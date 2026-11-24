@@ -1878,11 +1878,10 @@
   function previewDraftImage(path) {
     var repoPath = path.replace(/^\/images\//, 'source/images/');
     return ensureImageIndex().then(function (idx) {
-      var sha = idx.drafts[repoPath];
-      if (!sha) {
-        // 不在任何草稿分支：main 上有就用站点路径，否则说明图还不存在
-        return idx.main[repoPath] ? '' : '';
-      }
+      // 草稿分支或 main 上都有这张图时，直接从 GitHub 读 blob 预览：
+      // 不依赖 zerokami.cn 是否已经重新构建，避免刚发布那几分钟的 404。
+      var sha = idx.drafts[repoPath] || idx.main[repoPath];
+      if (!sha) return '';
       var hit = imgPreviewCache[path];
       if (hit && hit.sha === sha) return hit.url;
       return GitHubStore.readBlobBase64(sha).then(function (data) {
