@@ -495,8 +495,11 @@ function makeGitServer(posts) {
   const beforePublish = [...server.commits.keys()].length;
   d.querySelector('#btn-publish').click();
   await waitFor(() => !d.querySelector('#modal').classList.contains('hidden'), '发布确认弹窗');
-  check(d.querySelector('#modal-title').textContent === '发布到 main？', '弹窗标题',
+  check(d.querySelector('#modal-title').textContent === '发布到网站', '弹窗标题',
     d.querySelector('#modal-title').textContent);
+  const modalText = d.querySelector('#modal-body').textContent;
+  check(modalText.indexOf('草稿分支 draft/aaa111') !== -1, '弹窗写明草稿分支', modalText);
+  check(modalText.indexOf('Netlify 将开始构建') !== -1, '弹窗提示 Netlify 构建', modalText);
   const pubBtn = Array.from(d.querySelectorAll('#modal-foot .btn')).find((b) => b.textContent === '发布');
   check(!!pubBtn, '弹窗里有「发布」按钮');
   const busyEl = d.querySelector('#busy');

@@ -1150,8 +1150,8 @@
     if (p.saving) return false;
     var branch = p.draft.branch;
     var ok = await openModal({
-      title: '发布到 main？',
-      body: '<p class="tip">会把 <code>' + escapeHtml(branch) + '</code> 合并到 <code>main</code>，' +
+      title: '发布到网站',
+      body: '<p class="tip">会把草稿分支 <code>' + escapeHtml(branch) + '</code> 合并到 <code>main</code>，' +
         '然后删除该草稿分支。Netlify 将开始构建，通常 2–4 分钟。</p>',
       actions: [{ label: '取消', value: null }, { label: '发布', primary: true, value: true }]
     });
