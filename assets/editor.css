@@ -202,6 +202,16 @@ html[data-theme="light"] .post-list .p-badge {
   background: #fdf3d6;
   border-color: #e2b34a;
 }
+.post-list .p-badge-del {
+  color: var(--err);
+  background: rgba(245, 101, 101, .14);
+  border-color: rgba(245, 101, 101, .5);
+}
+html[data-theme="light"] .post-list .p-badge-del {
+  color: #a32828;
+  background: #fdecec;
+  border-color: #e08c8c;
+}
 .post-list .p-check {
   margin: 0 6px 0 2px;
   vertical-align: 1px;

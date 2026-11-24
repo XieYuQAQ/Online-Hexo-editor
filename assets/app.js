@@ -666,7 +666,9 @@
         });
         check.checked = state.selected.has(p.draft.branch);
         titleKids.push(check);
-        titleKids.push(el('span', { class: 'p-badge', text: '草稿' }));
+        titleKids.push(p.removed
+          ? el('span', { class: 'p-badge p-badge-del', text: '待删除' })
+          : el('span', { class: 'p-badge', text: '草稿' }));
       }
       titleKids.push(el('span', { text: postTitle(p) }));
       var li = el('li', {
@@ -796,14 +798,14 @@
   function openPostFromList(p) {
     if (!p) return;
     if (!p.github || p.loaded) { openPost(p); return; }
-    var branch = p.draft ? p.draft.branch : 'main';
+    var branch = (p.draft && !p.removed) ? p.draft.branch : 'main';
     toast('正在读取 ' + p.name + '…');
     GitHubStore.readPost(p.path, branch).then(function (data) {
       p.raw = data.text;
       p.doc = Core.parsePost(data.text);
       p.sha = data.sha;
       p.loaded = true;
-      p.readOnly = !p.draft;
+      p.readOnly = !p.draft || p.removed;
       rememberMeta(p, p.doc);
       openPost(p, { skipDraftCheck: true });
       reindex();
@@ -832,15 +834,18 @@
       if (b) b.classList.toggle('hidden', !on);
     }
     if (isGH) {
-      show('btn-edit', !!p && ro);
-      show('btn-save', !!p && !ro);
-      show('btn-publish', !!p && !ro && !!p.draft);
+      var removed = !!p && !!p.removed;
+      show('btn-edit', !!p && ro && !removed);
+      show('btn-save', !!p && !ro && !removed);
+      show('btn-publish', !!p && !!p.draft && (!ro || removed));
+      show('btn-undo-delete', removed);
+      show('btn-delete', !!p && !removed);
       show('btn-saveas', false);
       show('btn-dup', false);
-      show('btn-delete', false);
     } else {
       show('btn-edit', false);
       show('btn-publish', false);
+      show('btn-undo-delete', false);
       show('btn-save', true);
       show('btn-saveas', true);
       show('btn-dup', true);
@@ -851,7 +856,8 @@
     if (hint) {
       var text = '';
       if (isGH && p) {
-        if (ro) text = '只读 · main';
+        if (p.removed) text = '待删除 · ' + (p.draft ? p.draft.branch : '');
+        else if (ro) text = '只读 · main';
         else if (p.draft) text = '草稿 · ' + p.draft.branch;
         else text = '草稿 · 未保存';
       }
@@ -981,7 +987,8 @@
         savedOnce: true,
         github: true,
         readOnly: true,
-        loaded: false
+        loaded: false,
+        mainExists: true
       };
       if (hit && hit.sha === it.sha && hit.meta) {
         p.doc = docFromMeta(hit.meta);
@@ -1279,10 +1286,20 @@
 
     applied.forEach(function (a) {
       var post = a.post;
+      if (post && post.removed) {
+        // 删除型草稿发布完成：从列表里移除
+        state.posts = state.posts.filter(function (x) { return x !== post; });
+        state.selected.delete(a.branch);
+        clearDraft(post);
+        GitHubStore.deleteRef(a.branch).catch(function () { /* 忽略 */ });
+        if (state.current === post) closeEditor();
+        return;
+      }
       if (post) {
         var mine = a.files.filter(function (f) { return f.filename === post.path; })[0];
         if (mine && mine.sha) post.sha = mine.sha;
         post.draft = null;
+        post.removed = false;
         post.readOnly = true;
         post.editing = false;
         post.dirty = false;
@@ -1406,7 +1423,17 @@
         });
         for (var k = 0; k < changed.length; k += 1) {
           var f = changed[k];
-          if (f.status === 'removed' || !f.sha) continue;   // 删除型草稿暂不展示
+          if (f.status === 'removed' || !f.sha) {
+            // 分支里删掉了文件：main 上的同路径文章标记为「待删除」
+            var gone = state.posts.filter(function (x) { return x.path === f.filename; })[0] || null;
+            if (gone && gone !== state.current) {
+              gone.draft = { branch: ref.branch, base: base, head: ref.sha };
+              gone.removed = true;
+              gone.readOnly = true;
+              gone.editing = false;
+            }
+            continue;
+          }
           var path = f.filename;
           var name = path.slice(GitHubStore.postsDir.length);
           var text = await GitHubStore.readBlob(f.sha);
@@ -1442,6 +1469,7 @@
               readOnly: false,
               editing: true,
               loaded: true,
+              mainExists: false,
               draft: { branch: ref.branch, base: base, head: ref.sha }
             };
             np.meta = metaOf(np.doc);
@@ -1478,7 +1506,8 @@
       github: true,
       readOnly: false,
       editing: true,
-      loaded: true
+      loaded: true,
+      mainExists: false
     };
     state.posts.unshift(p);
     openPost(p, { skipDraftCheck: true });
@@ -3165,7 +3194,145 @@
     return candidate;
   }
 
+  /**
+   * GitHub 模式删除：
+   * - 从没发布过的草稿 → 直接删分支，不产生部署；
+   * - 已发布的文章 → 在草稿分支里删掉文件，发布后才真正消失，可撤销。
+   */
+  async function deleteGitHubPost() {
+    var p = state.current;
+    if (!p || !p.github) return false;
+    if (p.saving) return false;
+    if (p.removed) return undoGitHubDelete();
+
+    if (!p.mainExists) {
+      var del = await openModal({
+        title: '删除草稿',
+        body: '<p class="tip">这篇草稿还没发布过。删除会丢弃草稿分支 <code>' +
+          escapeHtml(p.draft ? p.draft.branch : '(未保存)') + '</code>，网站不受影响，也不产生部署。</p>',
+        actions: [{ label: '取消', value: null }, { label: '删除草稿', primary: true, danger: true, value: true }]
+      });
+      if (!del) return false;
+      showBusy('正在删除草稿…');
+      try {
+        if (p.draft) await GitHubStore.deleteRef(p.draft.branch).catch(function () { /* 忽略 */ });
+        if (p.draft) state.selected.delete(p.draft.branch);
+        state.posts = state.posts.filter(function (x) { return x !== p; });
+        clearDraft(p);
+        if (state.current === p) closeEditor();
+        reindex();
+        toast('草稿已删除', 'ok');
+        return true;
+      } catch (e) {
+        toast('删除失败：' + e.message, 'err');
+        return false;
+      } finally {
+        hideBusy();
+      }
+    }
+
+    var abbr = String(Core.get(p.doc, 'abbrlink') || '').trim().toLowerCase();
+    var branch = p.draft ? p.draft.branch : (abbr ? 'draft/' + abbr : '');
+    if (!branch) { toast('这篇文章没有 abbrlink，无法建立草稿分支', 'err'); return false; }
+    var ok = await openModal({
+      title: '删除文章',
+      body: '<p class="tip">会把 <code>' + escapeHtml(p.name) + '</code> 从草稿分支 <code>' +
+        escapeHtml(branch) + '</code> 里删除。<b>发布到网站后才会真正消失</b>，发布前可以撤销。</p>',
+      actions: [{ label: '取消', value: null }, { label: '删除', primary: true, danger: true, value: true }]
+    });
+    if (!ok) return false;
+
+    showBusy('正在标记为待删除…');
+    var step = '检查草稿分支';
+    try {
+      var head = await GitHubStore.findRef(branch);
+      var base = p.draft && p.draft.base ? p.draft.base : null;
+      var entries = [{ path: p.path, mode: '100644', type: 'blob', sha: null }];
+      var commitSha;
+      if (head) {
+        step = '更新草稿提交';
+        setBusyText('待删除：' + step);
+        var hc = await GitHubStore.getCommit(head);
+        if (!base) base = (hc.parents && hc.parents[0] && hc.parents[0].sha) || null;
+        var tree = await GitHubStore.createTree(hc.tree.sha, entries);
+        var c = await GitHubStore.createCommit('draft: 删除 ' + postTitle(p), tree, [head]);
+        await GitHubStore.updateRef(branch, c.sha, false);
+        commitSha = c.sha;
+      } else {
+        step = '创建草稿分支';
+        setBusyText('待删除：' + step);
+        var mainSha = await GitHubStore.headSha('main');
+        base = mainSha;
+        var mc = await GitHubStore.getCommit(mainSha);
+        var t2 = await GitHubStore.createTree(mc.tree.sha, entries);
+        var c2 = await GitHubStore.createCommit('draft: 删除 ' + postTitle(p), t2, [mainSha]);
+        await GitHubStore.createRef(branch, c2.sha);
+        commitSha = c2.sha;
+      }
+
+      p.draft = { branch: branch, base: base, head: commitSha };
+      p.removed = true;
+      p.readOnly = true;
+      p.editing = false;
+      p.dirty = false;
+      clearDraft(p);
+      updateDirtyUI();
+      applyReadOnly();
+      renderList();
+      toast('已标记为待删除，发布后才会从网站消失', 'ok');
+      return true;
+    } catch (e) {
+      console.error('[删除]', e && e.request, e);
+      toast('删除失败（' + step + '）：' + e.message, 'err');
+      return false;
+    } finally {
+      hideBusy();
+    }
+  }
+
+  /** 撤销待删除：把 main 上的原文恢复到草稿分支 */
+  async function undoGitHubDelete() {
+    var p = state.current;
+    if (!p || !p.removed || !p.draft) return false;
+    showBusy('正在撤销删除…');
+    try {
+      var data = await GitHubStore.readPost(p.path, 'main');
+      var blob = await GitHubStore.createBlob(data.text);
+      var head = await GitHubStore.branchHead(p.draft.branch);
+      var hc = await GitHubStore.getCommit(head);
+      var tree = await GitHubStore.createTree(hc.tree.sha, [
+        { path: p.path, mode: '100644', type: 'blob', sha: blob }
+      ]);
+      var commit = await GitHubStore.createCommit('draft: 恢复 ' + postTitle(p), tree, [head]);
+      await GitHubStore.updateRef(p.draft.branch, commit.sha, false);
+
+      // 恢复后如果和 main 完全一致，草稿分支就没有存在意义了
+      var diff = await GitHubStore.compare('main', commit.sha);
+      if (!((diff && diff.files) || []).length) {
+        await GitHubStore.deleteRef(p.draft.branch).catch(function () { /* 忽略 */ });
+        state.selected.delete(p.draft.branch);
+        p.draft = null;
+      } else {
+        p.draft.head = commit.sha;
+      }
+      p.removed = false;
+      p.readOnly = true;
+      p.editing = false;
+      applyReadOnly();
+      renderList();
+      toast('已撤销删除', 'ok');
+      return true;
+    } catch (e) {
+      console.error('[撤销删除]', e && e.request, e);
+      toast('撤销失败：' + e.message, 'err');
+      return false;
+    } finally {
+      hideBusy();
+    }
+  }
+
   async function deletePost() {
+    if (state.mode === 'github') return deleteGitHubPost();
     var p = state.current;
     if (!p) return;
     if (p.saving) { toast('文章正在保存，请完成后再删除', 'err'); return; }
@@ -3796,6 +3963,7 @@
     };
     $('#btn-dup').onclick = duplicatePost;
     $('#btn-delete').onclick = deletePost;
+    $('#btn-undo-delete').onclick = undoGitHubDelete;
     $('#btn-select-all').onclick = toggleSelectAll;
     $('#btn-publish-selected').onclick = publishSelectedDrafts;
 

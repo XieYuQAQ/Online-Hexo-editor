@@ -270,9 +270,17 @@ async function waitFor(fn, label, timeout) {
 /** 一个够用的内存 Git：blob / tree / commit / ref，行为按 GitHub 的几个端点模拟 */
 function makeGitServer(posts) {
   const blobs = new Map(), trees = new Map(), commits = new Map(), refs = new Map();
+  const blobByText = new Map();
   let seq = 0;
   const nid = (c) => c + (++seq);
-  const setBlob = (text) => { const sha = nid('b'); blobs.set(sha, text); return sha; };
+  // 和真实 Git 一样按内容寻址：同样的内容必须得到同一个 sha，否则「恢复删除」永远有差异
+  const setBlob = (text) => {
+    if (blobByText.has(text)) return blobByText.get(text);
+    const sha = nid('b');
+    blobs.set(sha, text);
+    blobByText.set(text, sha);
+    return sha;
+  };
   const setTree = (entries) => { const sha = nid('t'); trees.set(sha, new Map(entries)); return sha; };
   const setCommit = (message, tree, parents) => {
     const sha = nid('c'); commits.set(sha, { message, tree, parents }); return sha;
@@ -621,6 +629,77 @@ function makeGitServer(posts) {
 
   check(d.querySelectorAll('#post-list .p-badge').length === 0, '发布后没有草稿标签');
   check(bar.classList.contains('hidden'), '发布后草稿栏消失');
+
+  console.log(`[github] ${checks - failed}/${checks} 通过`);
+  if (failed) process.exitCode = 1;
+}
+
+/* ---------------- 5. 删除文章：待删除 → 撤销 → 再删除 → 发布生效 ---------------- */
+{
+  const dom = await boot();
+  const w = dom.window;
+  const d = w.document;
+  const server = makeGitServer(POSTS);
+  w.fetch = (url, init) => server.handle(url, init);
+  const PATH = 'source/_posts/30 排序测试.md';
+
+  const modalBtn = (text) => Array.from(d.querySelectorAll('#modal-foot .btn'))
+    .find((b) => b.textContent === text);
+
+  Array.from(d.querySelectorAll('.ws-card')).find((b) => /GitHub/.test(b.textContent)).click();
+  await waitFor(() => d.querySelectorAll('#post-list li').length === 3, '进入列表');
+  await waitFor(() => d.querySelector('#busy').classList.contains('hidden'), '列表加载完成');
+
+  d.querySelectorAll('#post-list li')[0].click();
+  await waitFor(() => d.querySelector('#f-title').value === '排序测试', '打开文章');
+  check(!d.querySelector('#btn-delete').classList.contains('hidden'), 'GitHub 模式下有「删除」');
+
+  /* 第一次删除：标记为待删除 */
+  d.querySelector('#btn-delete').click();
+  await waitFor(() => !d.querySelector('#modal').classList.contains('hidden'), '删除确认弹窗');
+  check(d.querySelector('#modal-title').textContent === '删除文章', '弹窗标题', d.querySelector('#modal-title').textContent);
+  modalBtn('删除').click();
+  await waitFor(() => server.refs.has('draft/aaa111'), '建立待删除草稿分支');
+  await waitFor(() => d.querySelector('#busy').classList.contains('hidden'), '删除标记完成');
+
+  const delHead = server.refs.get('draft/aaa111');
+  check(!server.treeOf(delHead).has(PATH), '草稿分支里文件已删除');
+  check(server.treeOf(server.refs.get('main')).has(PATH), 'main 上的文件还在（发布后才消失）');
+  check(d.querySelector('#readonly-hint').textContent === '待删除 · draft/aaa111', '提示待删除',
+    d.querySelector('#readonly-hint').textContent);
+  check(!d.querySelector('#btn-undo-delete').classList.contains('hidden'), '出现「撤销删除」');
+  check(d.querySelector('#btn-delete').classList.contains('hidden'), '待删除时隐藏「删除」');
+  check(!!d.querySelector('#post-list li .p-badge-del'), '列表显示「待删除」标签');
+  check(d.querySelector('#post-list li .p-badge-del').textContent === '待删除', '标签文字');
+
+  /* 撤销 */
+  d.querySelector('#btn-undo-delete').click();
+  await waitFor(() => !server.refs.has('draft/aaa111'), '撤销后分支被删掉');
+  await waitFor(() => d.querySelector('#busy').classList.contains('hidden'), '撤销完成');
+  check(!d.querySelector('#post-list .p-badge-del'), '撤销后没有待删除标签');
+  check(!d.querySelector('#btn-edit').classList.contains('hidden'), '撤销后回到可编辑入口');
+  check(d.querySelector('#readonly-hint').textContent === '只读 · main', '撤销后提示回到只读');
+
+  /* 再删除一次，然后发布 */
+  d.querySelector('#btn-delete').click();
+  await waitFor(() => !d.querySelector('#modal').classList.contains('hidden'), '再次删除确认');
+  modalBtn('删除').click();
+  await waitFor(() => server.refs.has('draft/aaa111'), '再次建立待删除分支');
+  await waitFor(() => d.querySelector('#busy').classList.contains('hidden'), '标记完成');
+  const before = server.refs.get('main');
+
+  d.querySelector('#btn-publish').click();
+  await waitFor(() => !d.querySelector('#modal').classList.contains('hidden'), '发布确认');
+  modalBtn('发布').click();
+  await waitFor(() => server.refs.get('main') !== before, '发布完成');
+  await waitFor(() => d.querySelector('#busy').classList.contains('hidden'), '发布遮罩消失');
+
+  check(!server.treeOf(server.refs.get('main')).has(PATH), '发布后 main 上文件已删除');
+  check(server.commits.get(server.refs.get('main')).message === 'post: 排序测试',
+    '提交信息', server.commits.get(server.refs.get('main')).message);
+  check(!server.refs.has('draft/aaa111'), '发布后草稿分支被删除');
+  await waitFor(() => d.querySelectorAll('#post-list li').length === 2, '列表剩下 2 篇');
+  check(!d.querySelector('#post-list .p-badge-del'), '发布后没有待删除标签');
 
   console.log(`[github] ${checks - failed}/${checks} 通过`);
   if (failed) process.exitCode = 1;
