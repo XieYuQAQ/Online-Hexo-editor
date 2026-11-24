@@ -2191,6 +2191,9 @@
       img.style.minHeight = size.h + 'px';
       if (size.w > 0) img.style.width = size.w + 'px';
     }
+    // 之前已经拿过 blob 地址的图，重建时直接带上 src，避免「先空白、再加载」的闪烁
+    var hit = imgPreviewCache[String(src || '')];
+    if (hit && hit.url) img.src = hit.url;
     return img;
   }
 
@@ -2206,21 +2209,26 @@
       img.setAttribute('data-done', '1');
       var src = img.getAttribute('data-src');
       if (!src) { markImgBad(img); return; }
+
+      function onLoad() {
+        if (!img.naturalWidth) { markImgBad(img); return; }
+        img.classList.add('ok');
+        // 占位用的内联尺寸交还给 CSS，再记录真实渲染尺寸（供下次重建占位）
+        img.style.minHeight = '';
+        img.style.width = '';
+        var r = img.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) {
+          state.imgSize.set(String(src), { w: Math.round(r.width), h: Math.round(r.height) });
+        }
+      }
+      img.addEventListener('load', onLoad, { once: true });
+      img.addEventListener('error', function () { markImgBad(img); }, { once: true });
+      // imgNode 里可能已经同步带上了缓存的 src，若已加载完就直接收尾
+      if (img.getAttribute('src') && img.complete) onLoad();
+
       Promise.resolve(resolveImageUrl(src)).then(function (url) {
         if (!url || !img.isConnected) { markImgBad(img); return; }
-        img.addEventListener('load', function () {
-          if (!img.naturalWidth) { markImgBad(img); return; }
-          img.classList.add('ok');
-          // 占位用的内联尺寸交还给 CSS，再记录真实渲染尺寸（供下次重建占位）
-          img.style.minHeight = '';
-          img.style.width = '';
-          var r = img.getBoundingClientRect();
-          if (r.width > 0 && r.height > 0) {
-            state.imgSize.set(String(src), { w: Math.round(r.width), h: Math.round(r.height) });
-          }
-        }, { once: true });
-        img.addEventListener('error', function () { markImgBad(img); }, { once: true });
-        img.src = url;
+        if (img.getAttribute('src') !== url) img.src = url;   // 不同才重设，避免重复触发加载
       }).catch(function () { markImgBad(img); });
     });
   }
