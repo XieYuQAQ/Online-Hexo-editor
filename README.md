@@ -148,11 +148,118 @@ npm run test:fixtures  # 用 test/fixtures/posts 的 4 篇样例
 
 ---
 
-## 部署
+## 部署（本项目现状）
 
-- 编辑器本体是纯静态站点，push 到 `XieYuQAQ/Online-Hexo-editor`（GitHub Pages）
-- `https://zerokami.cn/tools/online-hexo-editor` 由 Netlify 代理该 Pages 地址
-- Netlify Function 提供 `/api/github/*`（GitHub 代理 + 认证）与 `/comment/*`（Waline 评论代理）
+编辑器是纯静态站点，整个链路分三层：
+
+```
+浏览器
+  └─ https://zerokami.cn/tools/online-hexo-editor/*   (Netlify，同域，cookie 能带上)
+       └─ /.netlify/functions/online-hexo-editor-proxy → https://xieyuqaq.github.io/Online-Hexo-editor (GitHub Pages 静态站点)
+       └─ /.netlify/functions/github-api            → https://api.github.com (注入 token、限定仓库)
+       └─ /.netlify/functions/github-auth-*         → GitHub OAuth 授权
+```
+
+- 编辑器前端：push 到 `XieYuQAQ/Online-Hexo-editor`（GitHub Pages）
+- 代理与认证：Netlify Function，源码在博客仓库的 `source/netlify/` 下（`hexo generate` 后落到 `public/netlify/`）
+- 数据仓库：`XieYu-Zk/ZEROKAMI-STUDIO`
+
+---
+
+## 自托管：部署到自己的仓库
+
+要把这套部署到你自己的站点和仓库，需要四样东西：**一个 GitHub App、一个 Netlify 站点、编辑器静态站点、目标仓库**。
+
+### 1. 准备仓库与编辑器
+
+1. Fork 本仓库（`XieYuQAQ/Online-Hexo-editor`），在仓库 Settings → Pages 开启 GitHub Pages（选 main 分支）。
+2. 在 `index.html` 里、`assets/github.js` **之前**加一行，指定你的博客仓库：
+
+```html
+<script>window.HEXO_EDITOR_REPO = '你的用户名/你的仓库';</script>
+```
+
+（`github.js` 默认 `XieYu-Zk/ZEROKAMI-STUDIO`，也可直接改这个默认值。）
+
+### 2. 创建 GitHub App
+
+到 GitHub → Settings → Developer settings → GitHub Apps → New GitHub App：
+
+| 项 | 填什么 |
+|---|---|
+| Homepage URL | 你的站点首页 |
+| **User authorization callback URL** | `https://你的域名/.netlify/functions/github-auth-callback` |
+| Webhook | 关掉（Active 不勾选） |
+| Repository permissions → **Contents** | **Read and write** |
+| Where can this app be installed | 仅你的账号（Any account 也行，看需求） |
+
+建好后记下两样：**Client ID**、并生成一个 **Client secret**。
+
+> 说明：代码里环境变量叫 `GITHUB_APP_*`，走的是 GitHub App 的 **user-to-server** 授权流（返回 `refresh_token`，支持续期）。使用者需要对这个 App 授权，且对目标仓库有 push 权限。
+
+### 3. 部署 Netlify 函数
+
+把这三个函数放到 Netlify 站点的 functions 目录（本仓库源文件在 `source/netlify/functions/`，Hexo 构建后是 `public/netlify/functions/`）：
+
+- `github-auth-start.js` —— 跳转 GitHub 授权
+- `github-auth-callback.js` —— 用 code 换 token，加密写进 httpOnly cookie
+- `github-api.js` —— API 代理（校验登录态、注入 token、限定仓库、token 续期）
+
+在 `netlify.toml` 里声明 functions 目录，并加三条重写（`auth/start` 必须排在 `/api/github/*` 通配之前）：
+
+```toml
+[build]
+  functions = "netlify/functions"
+
+[[redirects]]
+  from = "/api/github/auth/start"
+  to = "/.netlify/functions/github-auth-start"
+  status = 200
+
+[[redirects]]
+  from = "/api/github/*"
+  to = "/.netlify/functions/github-api"
+  status = 200
+```
+
+如果要像本项目一样把编辑器挂在子路径下（`/tools/online-hexo-editor/`），再加编辑器代理（`online-hexo-editor-proxy.js`）：
+
+```toml
+[[redirects]]
+  from = "/tools/online-hexo-editor/*"
+  to = "/.netlify/functions/online-hexo-editor-proxy"
+  status = 200
+
+[[redirects]]
+  from = "/tools/online-hexo-editor"
+  to = "/.netlify/functions/online-hexo-editor-proxy"
+  status = 200
+```
+
+### 4. 配置环境变量（Netlify → Site settings → Environment variables）
+
+| 变量 | 说明 |
+|---|---|
+| `GITHUB_APP_CLIENT_ID` | GitHub App 的 Client ID |
+| `GITHUB_APP_CLIENT_SECRET` | GitHub App 的 Client secret |
+| `GITHUB_TOKEN_SECRET` | 一段随机串（≥32 字节），用于 AES-256-GCM 加密 cookie 里的 token |
+| `GITHUB_REPO` | 目标仓库 `owner/repo`（默认 `XieYu-Zk/ZEROKAMI-STUDIO`） |
+| `GITHUB_AUTH_CALLBACK` | 授权回调，默认 `https://你的域名/.netlify/functions/github-auth-callback` |
+| `GITHUB_AUTH_RETURN` | 授权完成回跳地址，默认 `/tools/online-hexo-editor/?auth=ok` |
+| `ONLINE_HEXO_EDITOR_UPSTREAM` | 编辑器静态站点地址，默认 `https://你的用户名.github.io/Online-Hexo-editor` |
+
+`GITHUB_TOKEN_SECRET` 可用 `openssl rand -base64 32` 生成。
+
+### 5. 校验
+
+- 打开 `https://你的域名/tools/online-hexo-editor/` → 会自动跳 GitHub 授权 → 回调后回到编辑器
+- 能列出仓库文章、编辑保存成 `draft/*` 分支、发布合并到 `main`，即成功
+
+**常见坑**：
+
+- `/api/github/auth/start` 一定要写在 `/api/github/*` 前面，否则会被通配吞掉
+- 授权回调 URL 必须和 GitHub App 里登记的一字不差（包括路径和协议）
+- 编辑器代理会给 HTML 注入 `<base>`，让 `assets/` 等相对路径解析回子路径；不要在这层再加别的缓存策略（JS/CSS 已设为 `no-cache, must-revalidate`）
 
 ---
 
