@@ -76,7 +76,7 @@ function sleep(ms) {
   // 保存状态挪到了属性面板底部、排在「预估 abbrlink」右边
   const propsFoot = d.querySelector('.props-foot');
   const kids = [...propsFoot.children].map((x) => x.id);
-  check(kids.join(',') === 'btn-frontmatter,btn-predict-link,save-state', '保存状态在「预估 abbrlink」右侧', kids.join(','));
+  check(kids.join(',') === 'btn-frontmatter,save-state', '保存状态在 Front Matter 按钮右侧', kids.join(','));
   check(!d.querySelector('.side-foot #save-state'), '底部状态栏里不再有保存状态');
   // 收起按钮：只在打开文章后出现
   check(d.querySelector('#btn-toggle-sidebar').classList.contains('hidden'), '未打开文章时没有收起按钮');
@@ -144,7 +144,7 @@ check(!!d.querySelector('#tags-chips'), '标签 chips 容器存在');
 const labels = [...d.querySelectorAll('#fields .field > .lbl')]
   .map((x) => (x.textContent.match(/[\u4e00-\u9fa5]+/) || [''])[0]);
 check(labels.join(',') === '标题,链接,文章描述,标签,时间,封面', '属性字段标签全为中文', labels.join(','));
-check(d.querySelector('#f-abbrlink').disabled === true, 'abbrlink 默认锁定');
+check(d.querySelector('#f-abbrlink').disabled === false, 'abbrlink 默认可编辑');
 check(d.querySelector('#f-date').disabled === true, 'date 默认锁定');
 
 /* --- 2b. 工具栏每个动作都有绑定（按钮存在且有 data-act） --- */

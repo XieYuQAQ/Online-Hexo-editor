@@ -107,9 +107,9 @@ const chips = Array.from(d.querySelectorAll('#tags-chips .chip span:first-child'
 check(JSON.stringify(chips) === JSON.stringify(tagsA), '标签 chips 渲染', chips.join(','));
 
 /* 锁定状态 */
-check(d.querySelector('#f-abbrlink').disabled === false, '已有 abbrlink → 解锁');
+check(d.querySelector('#f-abbrlink').disabled === false, 'abbrlink 可编辑');
 check(d.querySelector('#f-date').disabled === false, '已存在文件 → 日期解锁');
-check(d.querySelector('#lock-abbrlink').textContent === '🔓', 'abbrlink 锁图标为解锁');
+check(!!d.querySelector('#btn-regen-link'), '有按标题重算的按钮');
 
 /* front matter 预览 */
 E.renderFrontMatter();
@@ -263,13 +263,13 @@ check(savedText.endsWith('\n') || savedText.length > 0, '内容非空');
  * 7. 文件名校验 + abbrlink 锁定逻辑
  * ================================================================ */
 const newP = E.loadFromText('新文章.md', '', { isNew: true, dirty: true });
-check(d.querySelector('#f-abbrlink').value === '', '新文章 abbrlink 为空');
-check(d.querySelector('#f-abbrlink').disabled === true, '新文章 abbrlink 锁定');
-check(d.querySelector('#lock-abbrlink').textContent === '🔒', '新文章 abbrlink 锁图标为锁定');
+check(d.querySelector('#f-abbrlink').value === '', '空文档 abbrlink 为空');
+check(d.querySelector('#f-abbrlink').disabled === false, 'abbrlink 始终可编辑');
 
-/* 点锁 → 临时解锁 */
-d.querySelector('#lock-abbrlink').click();
-check(d.querySelector('#f-abbrlink').disabled === false, '点击锁可临时解锁 abbrlink');
+/* 空标题点重算：提示先填标题，不写值 */
+d.querySelector('#btn-regen-link').click();
+await sleep(30);
+check(d.querySelector('#f-abbrlink').value === '', '空标题不生成 abbrlink');
 
 /* ================================================================
  * 8. 新建文章：字段顺序与默认值

@@ -515,6 +515,33 @@ body {
 }
 .lock.unlocked { filter: none; }
 
+/* abbrlink 输入框内的重算按钮 */
+.field .input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.field .input-wrap input { padding-right: 30px; }
+.field .regen {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: 5px;
+  color: var(--fg-faint);
+  cursor: pointer;
+  opacity: .85;
+}
+.field .regen:hover { color: var(--accent); background: var(--bg-3); opacity: 1; }
+
 .field input[type="text"],
 .field textarea {
   width: 100%;

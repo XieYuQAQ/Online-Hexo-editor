@@ -417,26 +417,28 @@ await sleep(600);   // 等悬挂的封面预览回调落地（jsdom close 会拆
   check(posts._files.has(fname), '另存为不删原文件');
   const savedText = posts._files.get('99 另存测试.md');
   const savedCopy = Core.parsePost(savedText);
-  check(Core.get(savedCopy, 'abbrlink') === '' && savedCopy.body === Core.splitFront(origRaw).body, '另存为独立文章保留正文并清空短链');
+  const origAbbr = String(Core.get(Core.parsePost(origRaw), 'abbrlink'));
+  const savedAbbr = String(Core.get(savedCopy, 'abbrlink'));
+  check(!!savedAbbr && savedAbbr !== origAbbr && savedCopy.body === Core.splitFront(origRaw).body,
+    '另存为独立文章保留正文并生成新短链', origAbbr + ' -> ' + savedAbbr);
 
   // D4. 预估 abbrlink：填入后解锁 + 值进 doc
   E.closeEditor();
   const newDoc = Core.createPost({ title: '预估测试' });
   E.loadFromText('28 预估测试.md', Core.stringifyPost(newDoc), { isNew: true, dirty: true });
   const abbrInput = d.querySelector('#f-abbrlink');
-  check(abbrInput.disabled === true, '新文章 abbrlink 锁定');
-  d.querySelector('#btn-predict-link').click();
+  check(abbrInput.disabled === false, 'abbrlink 可编辑');
+  d.querySelector('#btn-regen-link').click();
   await sleep(60);
-  check(!d.querySelector('#modal').classList.contains('hidden'), '预估弹窗打开');
-  const fillBtn = Array.from(d.querySelectorAll('#modal-foot .btn')).find((b) => b.textContent === '填入');
-  check(!!fillBtn, '有「填入」按钮');
-  const guessShown = (d.querySelector('#modal-body').textContent.match(/crc32\(标题\) = ([0-9a-f]+)/) || [])[1];
+  check(!d.querySelector('#modal').classList.contains('hidden'), '重算弹窗打开');
+  const fillBtn = Array.from(d.querySelectorAll('#modal-foot .btn')).find((b) => b.textContent === '替换');
+  check(!!fillBtn, '有「替换」按钮');
+  const shown = (d.querySelector('#modal-body').textContent.match(/([0-9a-f]{6,8})/) || [])[1];
   fillBtn.click();
   await sleep(50);
-  check(abbrInput.value === guessShown, '填入后输入框 = 预估值', abbrInput.value + ' vs ' + guessShown);
-  check(abbrInput.disabled === false, '填入后 abbrlink 解锁');
-  check(String(Core.get(E.state.current.doc, 'abbrlink')) === guessShown, '预估值进 doc');
-  check(Core.crc32('预估测试').toString(16) === guessShown, '预估值与 crc32(title) 一致');
+  check(abbrInput.value === shown, '替换后输入框 = 新值', abbrInput.value + ' vs ' + shown);
+  check(String(Core.get(E.state.current.doc, 'abbrlink')) === shown, '新值进 doc');
+  check(Core.crc32('预估测试').toString(16) === shown, '新值与 crc32(title) 一致');
 await sleep(600);   // 等悬挂的封面预览回调落地（jsdom close 会拆 location）
   dom.window.close();
 }

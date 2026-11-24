@@ -242,8 +242,8 @@ check(!!np, '读到新文章');
 check(String(Core.get(np.doc, 'abbrlink')) === '', '新文章 abbrlink 为空');
 
 E.openPost(np, { skipDraftCheck: true });
-check(d.querySelector('#f-abbrlink').disabled === true, 'abbrlink 保持锁定（新文章）');
-check(d.querySelector('#lock-abbrlink').textContent === '🔒', '锁图标为锁定');
+check(d.querySelector('#f-abbrlink').disabled === false, 'abbrlink 可编辑');
+check(!!d.querySelector('#btn-regen-link'), '有按标题重算的按钮');
 
 /* ================================================================
  * 5. 改文件名保存：旧文件清理确认框（点「删除旧文件」）

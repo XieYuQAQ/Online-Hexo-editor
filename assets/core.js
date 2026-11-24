@@ -489,6 +489,27 @@
     return (crc32(String(title)) >>> 0).toString(16);
   }
 
+  /**
+   * 给标题分配一个未被占用的 abbrlink。
+   * 先用 crc32(title)，与已有值冲突时 +1 递增（hexo-abbrlink 的避让方式）。
+   * 编辑器写入后 Hexo 采用「有就不改」，两边不会打架。
+   * @param {string} title
+   * @param {Set<string>|Array<string>} [used] 已被占用的 abbrlink
+   * @returns {string} 小写十六进制；标题为空时返回 ''
+   */
+  function allocateAbbrlink(title, used) {
+    if (!title) return '';
+    var taken = new Set();
+    if (used instanceof Set) {
+      used.forEach(function (x) { taken.add(String(x).toLowerCase()); });
+    } else {
+      (used || []).forEach(function (x) { taken.add(String(x).toLowerCase()); });
+    }
+    var n = crc32(String(title)) >>> 0;
+    while (taken.has(n.toString(16))) n = (n + 1) >>> 0;
+    return n.toString(16);
+  }
+
   /* ------------------------------------------------------------------ *
    * 6. 文件名
    * ------------------------------------------------------------------ */
@@ -715,6 +736,7 @@
     formatDescription: formatDescription,
     crc32: crc32,
     predictAbbrlink: predictAbbrlink,
+    allocateAbbrlink: allocateAbbrlink,
     sanitizeFilename: sanitizeFilename,
     suggestFilename: suggestFilename,
     buildVideoBlock: buildVideoBlock,

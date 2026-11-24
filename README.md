@@ -66,15 +66,15 @@ hexo-editor/
 | 面板上的名字 | 字段 | 说明 |
 |---|---|---|
 | 标题 | `title` | 必填 |
-| 链接 | `abbrlink` | **新建时锁定**；`hexo generate` 写入文件后，点 ↻ 重新读取即解锁 |
+| 链接 | `abbrlink` | 新建时按标题自动生成；输入框右侧 ⟳ 可按标题重算（会改变 URL） |
 | 文章描述 | `description` | 单行自动转标量；多行自动变成 `>-` 折叠块（与站内 5 篇文章一致） |
 | 标签 | `tags` | 内联数组 `tags: [网站, 软件]`；带站点已有标签的联想 |
 | 时间 | `date` | **新建后锁定**；文件保存一次后解锁，格式 `YYYY-MM-DD HH:mm:ss` |
 | 封面 | `cover` | 站内绝对路径 `/images/...` 或完整 URL；可从本地选图并自动复制进 `source/images/YYYY/MM/` |
 
-锁定逻辑按你的要求实现：
+字段规则：
 
-- **abbrlink**：读到文件里已有值就解锁；为空时锁定，并提示「generate 后自动填入」。点锁图标可临时手动解锁；「预估 abbrlink」按钮会按 `_config.yml` 的 `abbrlink.alg: crc32` + `rep: hex` 算出 `crc32(title)` 供参考（注意 Hexo 只在缺失时写一次，改标题不会重算，所以只是预估）。
+- **abbrlink**：新建文章时按 `crc32(title)`（`abbrlink.alg: crc32` + `rep: hex`）自动生成并写入，与其他文章冲突时 +1 避让；之后改标题**不会重算**，需要换链接时点输入框右侧的 ⟳，确认后替换。这样编辑 GitHub 仓库时也不依赖 `hexo generate` 回填。
 - **date**：新建 → 锁定（创建时定好）；保存后 → 解锁。
 
 ### 正文（所见即所得）
@@ -126,7 +126,7 @@ hexo-editor/
 - 连上目录后右侧编辑区是**灰色不可用**的空态，点左侧文章或「＋ 新建」才有内容。
 - 打开文章后左侧列表自动收起，顶部 ☰ 按钮点一下弹回来；没打开文章时列表始终展开。
 - 列表底部一行：`x / y 篇` + 两个圆点 **绿=已连接 / 红=未连接**，点一下能重开引导换目录。
-- 保存状态（未保存 / 已保存）在属性面板底部、「预估 abbrlink」右侧。
+- 保存状态（未保存 / 已保存）在属性面板底部、「查看 Front Matter」右侧。
 - 头部从左到右：☰ 列表开关 → 主题三段按钮（☀ 白天 / ☾ 黑夜 / ◐ 跟随系统）→ **居中的文件名**；主题选择存在 localStorage，下次打开不闪。
 - 白天 / 黑夜两套配色由 CSS 变量切换（`html[data-theme="light"|"dark"]`），跟随系统时监听 `prefers-color-scheme` 实时切换。
 - 左栏搜索（标题 / 文件名 / 标签）、标签点选筛选、「未保存」过滤、三种排序。
@@ -171,7 +171,7 @@ hexo-editor/
 - 字段顺序、空 `cover:` 的写法、`description: >-` 折叠块、单引号包裹、行尾有无空白、结尾有无换行，全部原样保留。
 - 只改一个字段时，差异只落在该字段那一行（`test/edit.test.mjs`）。
 
-新文章则按站内主流顺序生成：`title → abbrlink → description → tags → date → cover`，`abbrlink` 留空、`cover` 留空（都输出成 `cover: `，与 45 篇无封面文章一致）。
+新文章则按站内主流顺序生成：`title → abbrlink → description → tags → date → cover`，`abbrlink` 按标题算好、`cover` 留空（输出成 `cover: `，与 45 篇无封面文章一致）。
 
 文件名建议规则复刻现有命名：`<两位年份> <标题>.md`（如 `26 迈从G3 A鼠标开箱.md`），也可切换成 `YYMM` 或纯标题。
 
@@ -209,7 +209,7 @@ npm run test:fixtures
 - **只支持 Chromium 系浏览器**（Chrome / Edge）直接写盘；Firefox / Safari 连这三个 picker 都没有，只能走导入降级模式。这是浏览器 API 的限制，不是实现问题。
 - 纯静态、无服务：全部功能都在 `index.html` + `assets/` 里，双击即用；没有构建步骤，也不需要 `node`。
 - `file://` 可以直接写盘，但源是 opaque —— 目录授权存进 IndexedDB 后，重启浏览器能否免授权不一定，多半要重新点一次「重新授权」（不用重新翻目录，详见「一、怎么打开」）。
-- `abbrlink` 预估只是参考值：Hexo 采用「有就不改」的策略，且冲突时会 +1 避让，最终以 `hexo generate` 写入的为准。
+- `abbrlink` 由编辑器生成，算法与 `hexo-abbrlink` 的 `crc32` + `hex` 一致；Hexo 采用「有就不改」的策略，不会覆盖已写入的值。
 
 ---
 

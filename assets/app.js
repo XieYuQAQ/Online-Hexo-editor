@@ -707,13 +707,13 @@
   function applyLocks() {
     if (!state.current) return;
     var abbr = String(Core.get(state.current.doc, 'abbrlink') || '').trim();
-    var abbrUnlocked = !!abbr || state.current.forceAbbrlink;
-    form.abbrlink.disabled = !abbrUnlocked;
-    $('#lock-abbrlink').textContent = abbrUnlocked ? '🔓' : '🔒';
-    $('#lock-abbrlink').classList.toggle('unlocked', abbrUnlocked);
-    $('#lock-abbrlink').title = abbrUnlocked
-      ? (abbr ? '已从文件读到 abbrlink，可编辑' : '已手动解锁')
-      : '锁定：hexo generate 会自动写入 abbrlink，之后点 ↻ 重新读取即可编辑';
+    form.abbrlink.disabled = false;
+    var regen = $('#btn-regen-link');
+    if (regen) {
+      regen.title = abbr
+        ? '按标题重新生成 abbrlink（会改变文章 URL）'
+        : '按标题生成 abbrlink';
+    }
 
     var dateUnlocked = !!state.current.savedOnce;
     form.date.disabled = !dateUnlocked;
@@ -2059,6 +2059,33 @@
     return Core.stringifyPost(state.current.doc);
   }
 
+  /** 项目里已被占用的 abbrlink（小写）；空值按 crc32(标题) 折算 */
+  function usedAbbrlinks(except) {
+    var set = new Set();
+    (state.posts || []).forEach(function (p) {
+      if (!p || p === except) return;
+      var v = String(Core.get(p.doc, 'abbrlink') || '').trim().toLowerCase();
+      if (!v) v = String(Core.predictAbbrlink(Core.get(p.doc, 'title')) || '').toLowerCase();
+      if (v) set.add(v);
+    });
+    return set;
+  }
+
+  /** 确保文章有 abbrlink：已有值不动，缺失时按标题分配 */
+  function ensureAbbrlink(p) {
+    if (!p) return '';
+    var cur = String(Core.get(p.doc, 'abbrlink') || '').trim();
+    if (cur) return cur;
+    var title = String(Core.get(p.doc, 'title') || '').trim();
+    if (!title) return '';
+    var v = Core.allocateAbbrlink(title, usedAbbrlinks(p));
+    if (v) {
+      Core.set(p.doc, 'abbrlink', v);
+      if (state.current === p) form.abbrlink.value = v;
+    }
+    return v;
+  }
+
   function linkFor(doc) {
     return String(Core.get(doc, 'abbrlink') || Core.predictAbbrlink(Core.get(doc, 'title'))).toLowerCase();
   }
@@ -2071,7 +2098,7 @@
     var title = base, n = 2;
     while (titles.has(title) || usedLinks.has(Core.predictAbbrlink(title))) title = base + ' (' + n++ + ')';
     Core.set(doc, 'title', title);
-    Core.set(doc, 'abbrlink', '');
+    Core.set(doc, 'abbrlink', Core.allocateAbbrlink(title, usedLinks));
     return doc;
   }
 
@@ -2106,6 +2133,7 @@
     opts = opts || {};
     var source = state.current;
     if (!source || source.saving) return;
+    ensureAbbrlink(source);
     var issues = validateAndShow();
     var errors = (issues || []).filter(function (i) { return i.level === 'error'; });
     if (errors.length && !opts.force) {
@@ -2262,6 +2290,7 @@
       cover: ''
     });
     Core.set(doc, 'date', Core.formatDateTime(now));
+    Core.set(doc, 'abbrlink', Core.allocateAbbrlink(title, usedAbbrlinks(null)));
 
     var name = Core.suggestFilename(title, now, 'yy');
     name = unusedName(name);
@@ -2282,7 +2311,7 @@
     form.fileName.select();
     saveDraft(p);
     toast(state.mode === 'demo' ? '正在临时写作，保存会下载 Markdown 文件' :
-      '日期与 abbrlink 已锁定：保存后日期解锁，hexo generate 后 abbrlink 解锁');
+      '日期已锁定（保存后解锁）；abbrlink 已按标题生成，可手动修改');
   }
 
   async function duplicatePost() {
@@ -2737,6 +2766,10 @@
     /* --- 属性字段 --- */
     form.title.oninput = function () {
       setField('title', form.title.value);
+      var p = state.current;
+      if (p && p.isNew && !String(Core.get(p.doc, 'abbrlink') || '').trim() && ensureAbbrlink(p)) {
+        applyLocks();
+      }
       renderFrontMatter();
     };
     form.description.oninput = function () { setField('description', form.description.value); };
@@ -2788,18 +2821,32 @@
       if (form.tagsInput.value.trim()) addTag(form.tagsInput.value);
     };
 
-    /* --- 锁定开关 --- */
-    $('#lock-abbrlink').onclick = function (e) {
+    /* --- abbrlink 重算 --- */
+    $('#btn-regen-link').onclick = function (e) {
       e.preventDefault();
       var p = state.current;
       if (!p) return;
-      if (String(Core.get(p.doc, 'abbrlink') || '').trim()) {
-        toast('abbrlink 已存在，可直接编辑');
-        return;
-      }
-      p.forceAbbrlink = !p.forceAbbrlink;
-      applyLocks();
-      if (p.forceAbbrlink) toast('已临时解锁 abbrlink（一般不需要手动填）');
+      var title = String(Core.get(p.doc, 'title') || '').trim();
+      if (!title) { toast('先填写标题，再生成 abbrlink', 'err'); return; }
+      var next = Core.allocateAbbrlink(title, usedAbbrlinks(p));
+      var cur = String(Core.get(p.doc, 'abbrlink') || '').trim();
+      if (cur && cur.toLowerCase() === next) { toast('当前 abbrlink 已是最新'); return; }
+      openModal({
+        title: '重新生成 abbrlink',
+        body: '<p class="tip">按当前标题计算：<code>' + escapeHtml(next) + '</code></p>' +
+          (cur
+            ? '<p class="tip">当前值 <code>' + escapeHtml(cur) + '</code> 会被替换，<b>文章 URL 将改变</b>，已有外链会失效。</p>'
+            : '<p class="tip">写入后 <code>hexo generate</code> 不会再改它。</p>'),
+        actions: [
+          { label: '取消', value: null },
+          { label: '替换', primary: true, onClick: function () {
+            form.abbrlink.value = next;
+            setField('abbrlink', next);
+            applyLocks();
+            renderFrontMatter();
+          } }
+        ]
+      });
     };
     $('#lock-date').onclick = function (e) {
       e.preventDefault();
@@ -2852,28 +2899,6 @@
       dragDepth = 0; dropHint.classList.remove('on');
       await applyCoverFile(e.dataTransfer.files[0], state.current);
     });
-
-    /* --- 预估 abbrlink --- */
-    $('#btn-predict-link').onclick = function () {
-      var t = String(Core.get(state.current.doc, 'title') || '');
-      var guess = Core.predictAbbrlink(t);
-      openModal({
-        title: '预估 abbrlink',
-        body: '<p class="tip">按 <code>_config.yml</code> 里的 <code>abbrlink.alg: crc32</code> + <code>rep: hex</code>，' +
-          'crc32(标题) = <code>' + guess + '</code>。</p>' +
-          '<p class="tip">注意：Hexo 只在文章<b>还没有</b> abbrlink 时写入一次，之后改标题也不会重算 —— ' +
-          '所以这里只是预估，实际以 <code>hexo generate</code> 写入的为准。</p>',
-        actions: [
-          { label: '关闭', value: null },
-          { label: '填入', primary: true, onClick: function () {
-            form.abbrlink.value = guess;
-            setField('abbrlink', guess);
-            state.current.forceAbbrlink = true;
-            applyLocks();
-          } }
-        ]
-      });
-    };
 
     /* --- 属性区折叠 / front matter --- */
     $('#btn-mobile-props').onclick = function () {
