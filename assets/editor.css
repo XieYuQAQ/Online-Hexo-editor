@@ -542,6 +542,39 @@ body {
 }
 .field .regen:hover { color: var(--accent); background: var(--bg-3); opacity: 1; }
 
+/* 启动时的「本地目录 / GitHub 仓库」选择 */
+.ws-chooser {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.ws-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 14px 16px;
+  text-align: left;
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--fg);
+  cursor: pointer;
+  font: inherit;
+}
+.ws-card:hover { border-color: var(--accent); }
+.ws-card b { font-size: 14px; font-weight: 500; }
+.ws-card span { font-size: 12px; color: var(--fg-faint); }
+
+/* main 只读标记 */
+.ro-hint {
+  font-size: 11px;
+  color: var(--warn);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+
 .field input[type="text"],
 .field textarea {
   width: 100%;

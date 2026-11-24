@@ -122,6 +122,8 @@ async function makeSession() {
   const dom = boot();
   await waitBooted(dom);   // 等 jsdom 自然触发 DOMContentLoaded（boot 只跑一次）
   const w = dom.window, d = w.document, E = w.HexoEditor;
+  // 启动时会弹「选择工作方式」，测试里直接收起，等价于用户选了本地目录
+  d.querySelector('#modal').classList.add('hidden');
   const { root, posts, images } = makeProject();
   await E.fs.attach(root);
   if (!d.querySelector('#modal').classList.contains('hidden')) {

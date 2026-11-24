@@ -176,7 +176,9 @@
    * 2. 状态
    * ================================================================ */
   var state = {
-    mode: 'demo',           // 'fs' | 'files' | 'demo'
+    mode: 'demo',           // 'fs' | 'files' | 'demo' | 'github'
+    readOnly: false,        // GitHub 模式下打开 main 上的文章时为 true
+    githubRepo: '',
     root: null,             // 项目根目录 handle
     postsDir: null,         // source/_posts handle
     imagesDir: null,        // source/images handle
@@ -622,7 +624,7 @@
       var tags = Core.get(p.doc, 'tags') || [];
       var li = el('li', {
         class: (state.current && state.current.id === p.id ? 'active ' : '') + (p.dirty ? 'dirty' : ''),
-        onclick: function () { openPost(p); }
+        onclick: function () { openPostFromList(p); }
       }, [
         el('div', { class: 'p-title', text: postTitle(p) }),
         el('div', { class: 'p-meta' }, [
@@ -701,6 +703,117 @@
     setCaret(0);
     syncActiveLine();
     hist = []; histIdx = -1; pushHistory();
+    applyReadOnly();
+  }
+
+  /** GitHub 模式下打开 main 上的文章：先拉内容，再走原有 openPost */
+  function openPostFromList(p) {
+    if (!p) return;
+    if (!p.github || p.loaded) { openPost(p); return; }
+    toast('正在读取 ' + p.name + '…');
+    GitHubStore.readPost(p.path, 'main').then(function (data) {
+      p.raw = data.text;
+      p.doc = Core.parsePost(data.text);
+      p.sha = data.sha;
+      p.loaded = true;
+      p.readOnly = true;
+      openPost(p, { skipDraftCheck: true });
+      reindex();
+    }).catch(function (e) {
+      toast('读取失败：' + e.message, 'err');
+    });
+  }
+
+  /** main 分支只读：禁表单、锁正文、隐藏保存/删除 */
+  function applyReadOnly() {
+    var ro = state.mode === 'github' && !!state.current && !!state.current.readOnly;
+    state.readOnly = ro;
+    ['title', 'description', 'cover', 'tagsInput', 'fileName'].forEach(function (k) {
+      if (form[k]) form[k].disabled = ro;
+    });
+    if (ro) {
+      if (form.abbrlink) form.abbrlink.disabled = true;
+      if (form.date) form.date.disabled = true;
+    }
+    if (bodyEl) bodyEl.setAttribute('contenteditable', ro ? 'false' : 'true');
+    ['btn-save', 'btn-saveas', 'btn-delete'].forEach(function (id) {
+      var b = document.getElementById(id);
+      if (b) b.classList.toggle('hidden', ro);
+    });
+    var hint = document.getElementById('readonly-hint');
+    if (hint) hint.classList.toggle('hidden', !ro);
+  }
+
+  /** 载入 GitHub 上的文章列表（只读，标题先取文件名） */
+  async function loadGitHubPosts() {
+    var list = await GitHubStore.listPosts('main');
+    state.posts = list.map(function (it) {
+      return {
+        id: uid(),
+        path: it.path,
+        name: it.name,
+        doc: Core.parsePost(''),
+        raw: '',
+        sha: it.sha,
+        dirty: false,
+        savedOnce: true,
+        github: true,
+        readOnly: true,
+        loaded: false
+      };
+    });
+    state.current = null;
+    reindex();
+    renderList();
+    refreshMainView();
+  }
+
+  async function enterGitHub() {
+    if (!window.GitHubStore) { toast('GitHub 模块未加载', 'err'); return; }
+    toast('正在连接 GitHub…');
+    var st = await GitHubStore.status();
+    if (!st.ok) {
+      if (st.error === 401) { GitHubStore.login(); return; }
+      toast('连接失败：' + (st.message || ('HTTP ' + st.error)), 'err');
+      return;
+    }
+    state.mode = 'github';
+    state.githubRepo = st.repo;
+    try {
+      await loadGitHubPosts();
+      updateModeUI();
+      toast('已连接 ' + st.repo + '，共 ' + state.posts.length + ' 篇', 'ok');
+    } catch (e) {
+      state.mode = 'demo';
+      updateModeUI();
+      toast('读取列表失败：' + e.message, 'err');
+    }
+  }
+
+  /** 启动时先问工作方式 */
+  function openWorkspaceChooser() {
+    function card(title, desc, onclick) {
+      return el('button', { class: 'ws-card', type: 'button', onclick: onclick }, [
+        el('b', { text: title }),
+        el('span', { text: desc })
+      ]);
+    }
+    var box = el('div', { class: 'ws-chooser' }, [
+      card('本地目录', '直接读写磁盘上的 source/_posts，和以前一样', function () {
+        $('#modal').classList.add('hidden');
+        maybeOpenDirGuide();
+      }),
+      card('GitHub 仓库', '草稿存到分支，发布时合并到 main', function () {
+        $('#modal').classList.add('hidden');
+        enterGitHub();
+      })
+    ]);
+    openModal({
+      title: '选择工作方式',
+      body: box,
+      actions: [{ label: '取消', value: null }],
+      enterConfirm: false
+    });
   }
 
   /** 日期 / abbrlink 的锁定规则 */
@@ -2133,6 +2246,7 @@
     opts = opts || {};
     var source = state.current;
     if (!source || source.saving) return;
+    if (state.readOnly) { toast('main 分支只读，请先点「编辑」创建草稿', 'err'); return; }
     ensureAbbrlink(source);
     var issues = validateAndShow();
     var errors = (issues || []).filter(function (i) { return i.level === 'error'; });
@@ -3079,8 +3193,8 @@
     }
     if (restored) toast('已从浏览器缓存恢复上次的目录', 'ok');
 
-    // 两个目录都连好就静默进入；第一次打开、或有目录没连上才弹引导
-    maybeOpenDirGuide();
+    // 每次都先问工作方式：本地目录 / GitHub 仓库
+    openWorkspaceChooser();
     state.booted = true;
   }
 

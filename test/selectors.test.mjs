@@ -86,7 +86,7 @@ check(orphan.length === 0, `CSS 里的 ${cssClasses.size} 个类都能对上 DOM
 
 /* ---------- 5. 脚本引用与文件存在性 ---------- */
 const scripts = [...html.matchAll(/<script src="([^"]+)"/g)].map((x) => x[1]);
-check(scripts.length === 2, `index.html 引入 ${scripts.length} 个脚本（core.js + app.js，无预览依赖）`);
+check(scripts.length === 3, `index.html 引入 ${scripts.length} 个脚本（core.js + github.js + app.js，无预览依赖）`);
 for (const s of scripts) {
   check(fs.existsSync(path.join(editorDir, s)), `脚本存在: ${s}`);
 }

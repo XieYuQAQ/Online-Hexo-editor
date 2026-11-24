@@ -65,10 +65,10 @@ function sleep(ms) {
   check(!d.querySelector('#dir-status'), '顶部状态文字已移除');
   check(!!d.querySelector('#toolbar button[data-act="table"]'), '工具栏含表格按钮');
   check(!!d.querySelector('#toolbar button[data-act="bilibili"]'), '工具栏含视频块按钮');
-  // 目录引导：启动即弹，底部两个圆点代表连接状态
-  check(!d.querySelector('#modal').classList.contains('hidden'), '启动后自动弹出「连接目录」引导');
-  check(d.querySelector('#modal-title').textContent === '连接目录', '引导标题为「连接目录」');
-  check(d.querySelectorAll('#modal .guide-row').length === 2, '引导里有两行：文章目录 / 图片目录');
+  // 启动先问工作方式，底部两个圆点代表本地目录的连接状态
+  check(!d.querySelector('#modal').classList.contains('hidden'), '启动后自动弹出「选择工作方式」');
+  check(d.querySelector('#modal-title').textContent === '选择工作方式', '弹窗标题为「选择工作方式」');
+  check(d.querySelectorAll('#modal .ws-card').length === 2, '有本地目录 / GitHub 仓库两个入口');
   check(!!d.querySelector('#dot-posts') && !!d.querySelector('#dot-images'), '底部有两个目录状态圆点');
   check(!d.querySelector('#dot-posts').classList.contains('on'), '未连接时文章目录圆点为红');
   check(!d.querySelector('#dot-images').classList.contains('on'), '未连接时图片目录圆点为红');
