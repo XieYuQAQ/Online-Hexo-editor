@@ -801,65 +801,134 @@
 
   /** 当前分支上的图片 + 各草稿分支新增的图片 */
   async function loadImageList() {
+    var sig = await getRepoSig();
+    var cached = await loadImgScanCache();
+    if (cached && cached.sig === sig.key && Array.isArray(cached.images) && cached.images.length) {
+      imgState.images = cached.images;
+      return cached.images;
+    }
     var map = Object.create(null);
-    var main = await GitHubStore.listImages('main');
+    var main = await GitHubStore.listImages('main', sig.mainSha);
     main.forEach(function (x) { map[x.path] = x; });
-    var drafts = await GitHubStore.listDrafts();
-    for (var i = 0; i < drafts.length; i += 1) {
-      var imgs = await GitHubStore.listImages(drafts[i].branch, drafts[i].sha);
+    for (var i = 0; i < sig.drafts.length; i += 1) {
+      var imgs = await GitHubStore.listImages(sig.drafts[i].branch, sig.drafts[i].sha);
       imgs.forEach(function (x) {
-        map[x.path] = { path: x.path, sha: x.sha, size: x.size, draftBranch: drafts[i].branch };
+        map[x.path] = { path: x.path, sha: x.sha, size: x.size, draftBranch: sig.drafts[i].branch };
       });
     }
-    return Object.keys(map).sort().map(function (k) { return map[k]; });
+    var list = Object.keys(map).sort().map(function (k) { return map[k]; });
+    imgState.images = list;
+    cached = cached || {};
+    cached.sig = sig.key;
+    cached.images = list;
+    await saveImgScanCache(cached);
+    return list;
   }
 
-  /** 全仓引用扫描：main 的文本文件 + 各草稿分支改动过的文本文件 */
+  /** 全仓引用扫描（增量）：版本没变走缓存；变了只重读变化过的文本文件 */
   async function scanImageRefs() {
-    var mainSha = await GitHubStore.headSha('main');
-    var drafts = await GitHubStore.listDrafts();
-    var key = mainSha + '|' + drafts.map(function (d) { return d.sha; }).join(',');
-    if (imgState.refs && imgState.scanKey === key) return imgState.refs;
+    var sig = await getRepoSig();
+    if (imgState.refs && imgState.scanKey === sig.key) return imgState.refs;
 
-    var files = await GitHubStore.listTextFiles('main', mainSha);
-    var extra = [];
-    for (var i = 0; i < drafts.length; i += 1) {
-      var diff = await GitHubStore.compare('main', drafts[i].sha);
+    var cached = await loadImgScanCache();
+    if (cached && cached.sig === sig.key && cached.refs) {
+      imgState.refs = cached.refs;
+      imgState.scanFailed = cached.failed || 0;
+      imgState.scanKey = sig.key;
+      return cached.refs;
+    }
+    if (!imgState.images.length) imgState.images = await loadImageList();
+
+    var mainFiles = await GitHubStore.listTextFiles('main', sig.mainSha);
+    var draftFiles = Object.create(null);
+    for (var i = 0; i < sig.drafts.length; i += 1) {
+      var diff = await GitHubStore.compare('main', sig.drafts[i].sha);
       ((diff && diff.files) || []).forEach(function (f) {
         if (f.status === 'removed' || !f.sha) return;
         if (!/\.(md|markdown|html?|ejs|styl|css|ya?ml|json|js|mjs|txt)$/i.test(f.filename)) return;
         if (/package-lock\.json$/i.test(f.filename)) return;
-        extra.push({ path: f.filename, sha: f.sha });
+        draftFiles[f.filename] = f.sha;
       });
     }
 
-    var targets = files.concat(extra);
-    var bases = imgState.images.map(function (x) { return imgBase(x.path); });
+    var prevMain = (cached && cached.main) || {};
+    var prevDraft = (cached && cached.draft) || {};
+    var mainOut = Object.create(null), draftOut = Object.create(null), toRead = [];
 
-    var found = Object.create(null);
+    mainFiles.forEach(function (f) {
+      var prev = prevMain[f.path];
+      if (prev && prev.sha === f.sha) mainOut[f.path] = prev;
+      else toRead.push({ path: f.path, sha: f.sha, bucket: 'main' });
+    });
+    Object.keys(draftFiles).forEach(function (path) {
+      var sha = draftFiles[path];
+      var prev = prevDraft[path];
+      if (prev && prev.sha === sha) draftOut[path] = prev;
+      else toRead.push({ path: path, sha: sha, bucket: 'draft' });
+    });
+
+    var failed = 0;
     var done = 0;
-    setBusyText('正在扫描图片引用 0 / ' + targets.length);
-    var res = await GitHubStore.readBlobs(targets, function (item, text) {
-      // 用子串匹配而不是分词：文件名里可能有 & @ ! ~ 等字符，
-      // 分词会把 `TO6Gf9&ASSC@yAY1.jpg` 切成两半，导致引用数永远为 0。
-      var lower = String(text).toLowerCase().replace(/&amp;/g, '&');
-      for (var b = 0; b < bases.length; b += 1) {
-        var base = bases[b];
-        if (base && lower.indexOf(base) !== -1) {
-          var bucket = found[base] || (found[base] = []);
-          if (bucket.indexOf(item.path) === -1) bucket.push(item.path);
-        }
-      }
+    setBusyText('正在扫描图片引用 0 / ' + toRead.length);
+    var res = await GitHubStore.readBlobs(toRead, function (item, text) {
+      var rec = { sha: item.sha, bases: extractImageBases(text) };
+      if (item.bucket === 'main') mainOut[item.path] = rec;
+      else draftOut[item.path] = rec;
       done += 1;
-      if (done % 10 === 0 || done === targets.length) {
-        setBusyText('正在扫描图片引用 ' + done + ' / ' + targets.length);
+      if (done % 10 === 0 || done === toRead.length) {
+        setBusyText('正在扫描图片引用 ' + done + ' / ' + toRead.length);
       }
-    }, { concurrency: 6 });
+    }, { concurrency: 8 });
+    failed = (res && res.failed) || 0;
 
-    imgState.refs = found;
-    imgState.scanFailed = (res && res.failed) || 0;
-    imgState.scanKey = key;
-    return found;
+    var refs = Object.create(null);
+    function add(path, bases) {
+      Object.keys(bases).forEach(function (b) { (refs[b] = refs[b] || []).push(path); });
+    }
+    Object.keys(mainOut).forEach(function (p) { add(p, mainOut[p].bases); });
+    Object.keys(draftOut).forEach(function (p) { add(p, draftOut[p].bases); });
+
+    imgState.refs = refs;
+    imgState.scanFailed = failed;
+    imgState.scanKey = sig.key;
+    cached = cached || {};
+    cached.sig = sig.key;
+    cached.refs = refs;
+    cached.main = mainOut;
+    cached.draft = draftOut;
+    cached.failed = failed;
+    await saveImgScanCache(cached);
+    return refs;
+  }
+
+  /** 图片扫描缓存 / 仓库版本签名 */
+  function imgScanCacheKey() {
+    return 'hexo-editor:imgscan:' + (state.githubRepo || (window.GitHubStore && GitHubStore.repo) || 'default');
+  }
+  async function loadImgScanCache() {
+    try { return await idb.get(imgScanCacheKey()); } catch (e) { return null; }
+  }
+  async function saveImgScanCache(v) {
+    try { await idb.set(imgScanCacheKey(), v); } catch (e) { /* 忽略 */ }
+  }
+  var repoSig = null;
+  async function getRepoSig() {
+    if (repoSig && Date.now() - repoSig.at < 5000) return repoSig;
+    var mainSha = await GitHubStore.headSha('main');
+    var drafts = await GitHubStore.listDrafts();
+    repoSig = {
+      mainSha: mainSha,
+      drafts: drafts,
+      key: mainSha + '|' + drafts.map(function (d) { return d.sha; }).join(','),
+      at: Date.now()
+    };
+    return repoSig;
+  }
+  function invalidateImgCache() {
+    repoSig = null;
+    state.imageIndex = null;
+    imgState.refs = null;
+    imgState.scanKey = '';
   }
 
   /** 从文本里抽出图片文件名（小写，&amp; 还原） */
@@ -1160,6 +1229,7 @@
     await GitHubStore.updateRef(p.draft.branch, commit.sha, false);
     p.draft.head = commit.sha;
     if (state.imageIndex) state.imageIndex.drafts[repoPath] = blobSha;
+    repoSig = null;   // 分支 head 变了，下次拿版本签名时重取
     return '/' + repoPath.replace(/^source\//, '');
   }
 
@@ -1496,6 +1566,7 @@
     updateDirtyUI();
     applyReadOnly();
     renderList();
+    invalidateImgCache();
     if (queuedImgs.length) {
       imgState.queue = imgState.queue.filter(function (p) { return queuedImgs.indexOf(p) === -1; });
       saveImgQueue();
@@ -1855,23 +1926,21 @@
    * 用来判断某张图是「已发布（走站点路径）」还是「只在草稿分支（走 blob）」，跟当前打开哪篇无关。
    */
   async function ensureImageIndex() {
-    var mainSha = await GitHubStore.headSha('main');
-    var drafts = await GitHubStore.listDrafts();
-    var key = mainSha + '|' + drafts.map(function (d) { return d.sha; }).join(',');
-    if (state.imageIndex && state.imageIndex.key === key) return state.imageIndex;
+    var sig = await getRepoSig();
+    if (state.imageIndex && state.imageIndex.key === sig.key) return state.imageIndex;
 
-    var main = await GitHubStore.listImages('main', mainSha);
+    var main = await GitHubStore.listImages('main', sig.mainSha);
     var mainSet = Object.create(null);
     main.forEach(function (x) { mainSet[x.path] = x.sha; });
 
     var draftMap = Object.create(null);
-    for (var i = 0; i < drafts.length; i += 1) {
-      var imgs = await GitHubStore.listImages(drafts[i].branch, drafts[i].sha);
+    for (var i = 0; i < sig.drafts.length; i += 1) {
+      var imgs = await GitHubStore.listImages(sig.drafts[i].branch, sig.drafts[i].sha);
       imgs.forEach(function (x) {
         if (!(x.path in draftMap)) draftMap[x.path] = x.sha;
       });
     }
-    state.imageIndex = { key: key, main: mainSet, drafts: draftMap };
+    state.imageIndex = { key: sig.key, main: mainSet, drafts: draftMap };
     return state.imageIndex;
   }
 
