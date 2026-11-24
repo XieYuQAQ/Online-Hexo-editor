@@ -889,6 +889,37 @@
     }
   }
 
+  /** 重新读取 GitHub 列表（sha 没变的文章仍走缓存，不重复拉正文） */
+  async function refreshGitHub() {
+    if (state.mode !== 'github') return false;
+    if (state.current) closeEditor();
+    toast('正在重新读取 GitHub 列表…');
+    var info = await loadGitHubPosts();
+    updateModeUI();
+    toast('已刷新，共 ' + info.total + ' 篇' +
+      (info.cached ? '（' + info.cached + ' 篇来自缓存）' : ''), 'ok');
+    return true;
+  }
+
+  /** 点左下角 GitHub 状态：仓库信息 / 重新读取 / 换回本地目录 */
+  function openGitHubInfo() {
+    var body = el('div', { class: 'guide' }, [
+      el('p', { class: 'tip', text: '已连接 ' + (state.githubRepo || '') + ' · main，共 ' + state.posts.length + ' 篇文章。' }),
+      el('p', { class: 'tip', text: 'main 上的文章是只读的，改动需要先转成草稿分支（下一步接入）。' })
+    ]);
+    openModal({
+      title: 'GitHub 仓库',
+      body: body,
+      enterConfirm: false,
+      actions: [
+        { label: '切换为本地目录', onClick: function () { setTimeout(openWorkspaceChooser, 0); } },
+        { label: '重新读取', primary: true, onClick: function () {
+          refreshGitHub().catch(function (e) { toast('刷新失败：' + e.message, 'err'); });
+        } }
+      ]
+    });
+  }
+
   /** 启动时先问工作方式 */
   function openWorkspaceChooser() {
     function card(title, desc, onclick) {
@@ -2712,11 +2743,26 @@
     applySidebar();
   }
 
-  /** 列表底部的两个状态圆点：绿=已连接，红=未连接 */
+  /** 列表底部的状态圆点：绿=已连接，红=未连接；GitHub 模式换成仓库状态 */
   function renderDirDots() {
     var p = $('#dot-posts');
     var im = $('#dot-images');
+    var gh = $('#dot-github');
     if (!p || !im) return;
+
+    var isGH = state.mode === 'github';
+    if (gh) {
+      gh.classList.toggle('hidden', !isGH);
+      if (isGH) {
+        gh.classList.add('on');
+        var label = gh.querySelector('span');
+        if (label) label.textContent = 'GitHub · ' + state.posts.length + ' 篇';
+        gh.title = '已连接 ' + (state.githubRepo || '') + ' · main（点击查看）';
+      }
+    }
+    p.classList.toggle('hidden', isGH);
+    im.classList.toggle('hidden', isGH);
+    if (isGH) return;
 
     var postsOk = state.mode === 'fs' && !!state.postsDir;
     p.classList.toggle('on', postsOk);
@@ -2938,6 +2984,8 @@
     /* --- 目录连接：只剩底部两个圆点（顶部按钮已移除，弹窗由引导负责） --- */
     $('#dot-posts').onclick = function () { openDirGuide(); };
     $('#dot-images').onclick = function () { openDirGuide(); };
+    var dotGh = $('#dot-github');
+    if (dotGh) dotGh.onclick = function () { openGitHubInfo(); };
 
     /* --- 侧栏收起 / 展开 --- */
     $('#btn-toggle-sidebar').onclick = toggleSidebar;
@@ -2959,6 +3007,10 @@
     $('#btn-new').onclick = newPost;
     $('#btn-refresh').onclick = async function () {
       commitCurrentDraft();
+      if (state.mode === 'github') {
+        try { await refreshGitHub(); } catch (e) { toast('刷新失败：' + e.message, 'err'); }
+        return;
+      }
       if (state.mode === 'fs') {
         try {
           await FS.reload();

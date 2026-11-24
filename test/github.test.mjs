@@ -178,6 +178,37 @@ async function waitFor(fn, label, timeout) {
   check(!d.querySelector('#readonly-hint').classList.contains('hidden'), 'main 上的文章仍是只读');
   check(d.querySelector('#btn-save').classList.contains('hidden'), '只读态隐藏保存按钮');
 
+  /* 左下角状态：GitHub 模式只显示仓库态，两个本地目录圆点收起 */
+  const dotGh = d.querySelector('#dot-github');
+  check(!!dotGh, '存在 GitHub 状态按钮');
+  check(!dotGh.classList.contains('hidden'), 'GitHub 模式下显示仓库状态');
+  check(dotGh.classList.contains('on'), '仓库状态为已连接（绿）');
+  check(dotGh.textContent.indexOf('3 篇') !== -1, '状态里带篇数', dotGh.textContent.trim());
+  check(d.querySelector('#dot-posts').classList.contains('hidden'), '文章目录圆点已隐藏');
+  check(d.querySelector('#dot-images').classList.contains('hidden'), '图片目录圆点已隐藏');
+
+  /* 点状态 → 仓库信息弹窗 */
+  dotGh.click();
+  await waitFor(() => !d.querySelector('#modal').classList.contains('hidden'), '仓库信息弹窗打开');
+  check(d.querySelector('#modal-title').textContent === 'GitHub 仓库', '弹窗标题为「GitHub 仓库」',
+    d.querySelector('#modal-title').textContent);
+  d.querySelector('#modal-close').click();
+  await waitFor(() => d.querySelector('#modal').classList.contains('hidden'), '弹窗关闭');
+
+  /* 刷新按钮：重新读取 GitHub 列表，不再掉进「选择文件夹」 */
+  const blobsBefore = calls.filter((u) => /\/git\/blobs\//.test(u)).length;
+  d.querySelector('#btn-refresh').click();
+  await waitFor(() => d.querySelectorAll('#post-list li').length === 3, '刷新后仍是 3 篇');
+  await new Promise((r) => setTimeout(r, 200));
+  const blobsAfter = calls.filter((u) => /\/git\/blobs\//.test(u)).length;
+  check(blobsAfter === blobsBefore, '刷新走缓存，不重复拉 blob', blobsBefore + ' -> ' + blobsAfter);
+  const titlesAfter = Array.from(d.querySelectorAll('#post-list li .p-title')).map((x) => x.textContent);
+  check(titlesAfter.join('|') === '排序测试|中间一篇|最早一篇', '刷新后标题仍是 front matter 的',
+    titlesAfter.join('|'));
+  check(d.querySelector('#modal').classList.contains('hidden'), '刷新不会弹出文件夹选择框');
+  check(!d.querySelector('#toast') || d.querySelector('#toast').textContent.indexOf('刷新失败') === -1,
+    '刷新没有报错提示');
+
   console.log(`[github] ${checks - failed}/${checks} 通过`);
   if (failed) process.exitCode = 1;
 }
