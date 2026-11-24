@@ -73,6 +73,8 @@ async function boot(handler) {
   w.indexedDB = undefined;                 // 不落缓存，每次都是冷启动
   if (!w.TextDecoder) w.TextDecoder = TextDecoder;
   if (!w.TextEncoder) w.TextEncoder = TextEncoder;
+  if (!w.URL.createObjectURL) w.URL.createObjectURL = () => 'blob:mock-' + Math.random().toString(36).slice(2);
+  if (!w.URL.revokeObjectURL) w.URL.revokeObjectURL = () => {};
   w.HEXO_EDITOR_REPO = REPO;
   if (handler) w.fetch = handler;          // 必须在脚本启动前装好：现在启动即连 GitHub
 
@@ -322,6 +324,14 @@ function makeGitServer(posts, opts) {
     }
     return out;
   }
+
+  // 预置一个草稿分支：基于 main，叠加 opts.draft.files 里的文件
+  if (opts.draft) {
+    const m = new Map(treeOf(firstCommit));
+    Object.keys(opts.draft.files || {}).forEach((k) => m.set(k, setBlob(opts.draft.files[k])));
+    refs.set(opts.draft.branch, setCommit('draft: ' + opts.draft.branch, setTree(m), [firstCommit]));
+  }
+
 
   /** GitHub 的 compare 用三点语义：先找 merge base，再比 tree */
   function mergeBase(a, b) {
@@ -842,6 +852,39 @@ function makeGitServer(posts, opts) {
   check(d.querySelector('#modal-title').textContent === '删除文章',
     '发布过的文章走「删除文章」', d.querySelector('#modal-title').textContent);
   Array.from(d.querySelectorAll('#modal-foot .btn')).find((b) => b.textContent === '取消').click();
+
+  console.log(`[github] ${checks - failed}/${checks} 通过`);
+  if (failed) process.exitCode = 1;
+}
+
+/* ---------------- 8. 草稿分支里的图片从 blob 预览 ---------------- */
+{
+  const IMG = 'source/images/2026/11/ln3mqyc1dw.jpg';
+  const posts = POSTS.map((p, i) => (i === 0
+    ? { ...p, body: p.body + '\n\n![](/images/2026/11/ln3mqyc1dw.jpg)' }
+    : p));
+  const server = makeGitServer(POSTS, {
+    draft: {
+      branch: 'draft/aaa111',
+      files: {
+        [IMG]: Buffer.from('fake-image', 'utf8').toString('base64'),
+        'source/_posts/30 排序测试.md': rawOf(posts[0])
+      }
+    }
+  });
+  const dom = await bootWithServer(server);
+  const w = dom.window, d = w.document;
+
+  d.querySelectorAll('#post-list li')[0].click();
+  await waitFor(() => d.querySelector('#f-title').value === '排序测试', '打开草稿文章');
+  check(d.querySelector('#readonly-hint').textContent === '草稿 · draft/aaa111', '当前是草稿',
+    d.querySelector('#readonly-hint').textContent);
+
+  const url = await w.HexoEditor.resolveImageUrl('/images/2026/11/ln3mqyc1dw.jpg');
+  check(typeof url === 'string' && url.indexOf('blob:') === 0, '草稿图片走 blob 预览', String(url));
+
+  const url2 = await w.HexoEditor.resolveImageUrl('/images/2026/10/not-published.jpg');
+  check(url2 === '/images/2026/10/not-published.jpg', '非草稿图片仍走站点路径', String(url2));
 
   console.log(`[github] ${checks - failed}/${checks} 通过`);
   if (failed) process.exitCode = 1;

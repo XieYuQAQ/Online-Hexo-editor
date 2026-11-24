@@ -214,6 +214,8 @@
     posts: [],              // { id, path, name, doc, raw, handle, dirty, savedOnce }
     selected: new Set(),    // GitHub 模式里勾选的草稿分支名
     current: null,
+    draftImageBranch: null, // 已建索引的草稿分支名
+    draftImages: null,      // 草稿分支图片索引 { path: sha }
     filter: { q: '', tags: [], dirtyOnly: false, sort: 'date-desc' },
     imgSize: new Map()      // path -> { w, h }：上次加载后的实际渲染尺寸，重建时用来占位，避免图片重新加载时高度塌陷
   };
@@ -1029,6 +1031,7 @@
     var commit = await GitHubStore.createCommit('draft: 上传图片 ' + name, tree, [head]);
     await GitHubStore.updateRef(p.draft.branch, commit.sha, false);
     p.draft.head = commit.sha;
+    if (state.draftImages) state.draftImages[repoPath] = blobSha;
     return '/' + repoPath.replace(/^source\//, '');
   }
 
@@ -1677,13 +1680,54 @@
     });
   }
 
-  /** 站内路径 → 可显示的 URL：在线版直接用 /images/...，由站点提供 */
+  /** 站内路径 → 可显示的 URL：草稿分支里的图从 blob 读，其余走站点路径 */
   function resolveImageUrl(path) {
     if (!path) return Promise.resolve('');
     path = String(path).trim();
     if (/^https?:/i.test(path)) return Promise.resolve(path);
     if (path.charAt(0) !== '/') return Promise.resolve('');
+    if (path.indexOf('/images/') === 0) {
+      return previewDraftImage(path).then(function (url) { return url || path; });
+    }
     return Promise.resolve(path);
+  }
+
+  // 草稿分支图片预览：path → { sha, url } 缓存
+  var imgPreviewCache = Object.create(null);
+
+  /** 当前打开文章所属草稿分支上的图片索引（path → blob sha），惰性构建 */
+  async function ensureDraftImageIndex() {
+    var p = state.current;
+    var branch = p && p.draft ? p.draft.branch : null;
+    if (!branch) return null;
+    if (state.draftImageBranch === branch) return state.draftImages;
+    try {
+      var imgs = await GitHubStore.listImages(branch, p.draft.head || undefined);
+      var map = Object.create(null);
+      imgs.forEach(function (x) { map[x.path] = x.sha; });
+      state.draftImageBranch = branch;
+      state.draftImages = map;
+    } catch (e) { /* 忽略，退回站点路径 */ }
+    return state.draftImages;
+  }
+
+  function previewDraftImage(path) {
+    return ensureDraftImageIndex().then(function (map) {
+      if (!map) return '';
+      var sha = map[path.replace(/^\/images\//, 'source/images/')];
+      if (!sha) return '';
+      var hit = imgPreviewCache[path];
+      if (hit && hit.sha === sha) return hit.url;
+      return GitHubStore.readBlobBase64(sha).then(function (data) {
+        var bin = atob(data.base64);
+        var bytes = new Uint8Array(bin.length);
+        for (var i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+        if (!window.URL || !URL.createObjectURL) return '';
+        var url = URL.createObjectURL(new Blob([bytes]));
+        imgPreviewCache[path] = { sha: sha, url: url };
+        return url;
+      }).catch(function () { return ''; });
+    });
   }
 
   /** 把选中的图片写入 source/images 并返回站内路径 */
@@ -3493,6 +3537,7 @@
     historyPush: pushHistory,
     updateModeUI: updateModeUI,
     renderGitHubStatus: renderGitHubStatus,
+    resolveImageUrl: resolveImageUrl,
     refreshMainView: refreshMainView,
     toggleSidebar: toggleSidebar,
     applyTheme: applyTheme,
