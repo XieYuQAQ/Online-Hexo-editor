@@ -1,4 +1,6 @@
-# Hexo 文章编辑器 · ZEROKAMI
+# Hexo 在线文章编辑器
+
+本项目使用Deepseek V4.1 Flash生成，需要使用到Github、Netlify。
 
 在线 Markdown 文章编辑器，直接读写你的 Hexo 博客仓库的 `source/_posts` 与 `source/images`。
 
