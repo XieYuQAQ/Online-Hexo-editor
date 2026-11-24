@@ -622,11 +622,14 @@
     posts.forEach(function (p) {
       var date = String(Core.get(p.doc, 'date') || '').slice(0, 10);
       var tags = Core.get(p.doc, 'tags') || [];
+      var titleKids = [];
+      if (p.draft) titleKids.push(el('span', { class: 'p-badge', text: '草稿' }));
+      titleKids.push(el('span', { text: postTitle(p) }));
       var li = el('li', {
         class: (state.current && state.current.id === p.id ? 'active ' : '') + (p.dirty ? 'dirty' : ''),
         onclick: function () { openPostFromList(p); }
       }, [
-        el('div', { class: 'p-title', text: postTitle(p) }),
+        el('div', { class: 'p-title' }, titleKids),
         el('div', { class: 'p-meta' }, [
           el('span', { text: date || '无日期' }),
           el('span', { class: 'p-tags', text: tags.slice(0, 3).join(' / ') })
@@ -725,9 +728,11 @@
     });
   }
 
-  /** main 分支只读：禁表单、锁正文、隐藏保存/删除 */
+  /** GitHub 模式的分支状态 → 表单可编辑性 + 按钮组 */
   function applyReadOnly() {
-    var ro = state.mode === 'github' && !!state.current && !!state.current.readOnly;
+    var p = state.current;
+    var isGH = state.mode === 'github';
+    var ro = isGH && !!p && !!p.readOnly;
     state.readOnly = ro;
     ['title', 'description', 'cover', 'tagsInput', 'fileName'].forEach(function (k) {
       if (form[k]) form[k].disabled = ro;
@@ -737,12 +742,52 @@
       if (form.date) form.date.disabled = true;
     }
     if (bodyEl) bodyEl.setAttribute('contenteditable', ro ? 'false' : 'true');
-    ['btn-save', 'btn-saveas', 'btn-delete'].forEach(function (id) {
+
+    function show(id, on) {
       var b = document.getElementById(id);
-      if (b) b.classList.toggle('hidden', ro);
-    });
+      if (b) b.classList.toggle('hidden', !on);
+    }
+    if (isGH) {
+      show('btn-edit', !!p && ro);
+      show('btn-save', !!p && !ro);
+      show('btn-publish', !!p && !ro && !!p.draft);
+      show('btn-saveas', false);
+      show('btn-dup', false);
+      show('btn-delete', false);
+    } else {
+      show('btn-edit', false);
+      show('btn-publish', false);
+      show('btn-save', true);
+      show('btn-saveas', true);
+      show('btn-dup', true);
+      show('btn-delete', true);
+    }
+
     var hint = document.getElementById('readonly-hint');
-    if (hint) hint.classList.toggle('hidden', !ro);
+    if (hint) {
+      var text = '';
+      if (isGH && p) {
+        if (ro) text = '只读 · main';
+        else if (p.draft) text = '草稿 · ' + p.draft.branch;
+        else text = '草稿 · 未保存';
+      }
+      hint.classList.toggle('hidden', !text);
+      if (text) hint.textContent = text;
+    }
+  }
+
+  /** 点「编辑」：把 main 上的只读文章转成可编辑草稿（此时还没建分支） */
+  function enterDraftMode() {
+    var p = state.current;
+    if (!p || state.mode !== 'github' || !p.readOnly) return;
+    p.readOnly = false;
+    p.editing = true;
+    applyLocks();
+    applyReadOnly();
+    updateDirtyUI();
+    bodyEl.focus();
+    toast('可编辑了。保存后写入草稿分支 draft/' +
+      (String(Core.get(p.doc, 'abbrlink') || '').trim() || '…'), 'ok');
   }
 
   /* ---- GitHub 列表元信息（标题/日期/标签）缓存 ---- */
@@ -859,9 +904,10 @@
     state.current = null;
     reindex();
     refreshMainView();
-    fillGitHubMeta(missing).catch(function (e) {
-      toast('读取文章信息失败：' + e.message, 'err');
-    });
+    fillGitHubMeta(missing)
+      .catch(function (e) { toast('读取文章信息失败：' + e.message, 'err'); })
+      .then(function () { return mergeDraftBranches(); })
+      .catch(function () { /* 草稿合并失败不影响主列表 */ });
     return { total: state.posts.length, cached: state.posts.length - missing.length };
   }
 
@@ -945,6 +991,274 @@
         } }
       ]
     });
+  }
+
+  /* ---------------- 草稿分支：保存 / 发布 ---------------- */
+
+  /** 保存到草稿分支（第一次保存才建分支） */
+  async function saveGitHubDraft(source, opts) {
+    if (!source || source.saving) return false;
+    ensureAbbrlink(source);
+    var title = String(Core.get(source.doc, 'title') || '').trim();
+    if (!title) { toast('请先填写标题', 'err'); return false; }
+    var abbr = String(Core.get(source.doc, 'abbrlink') || '').trim().toLowerCase();
+    if (!abbr) { toast('缺少 abbrlink，无法建立草稿分支', 'err'); return false; }
+
+    var requested = (opts && opts.name != null) ? opts.name : form.fileName.value;
+    var name = Core.sanitizeFilename(String(requested || '').trim() || source.name);
+    if (!/\.md$/i.test(name)) name += '.md';
+    if (!name || name === '.md') { toast('文件名不合法', 'err'); return false; }
+
+    var path = GitHubStore.postsDir + name;
+    var branch = 'draft/' + abbr;
+    var oldPath = source.path;
+    var oldKey = oldPath ? draftKey({ projectId: source.projectId, path: oldPath }) : '';
+    var text = Core.stringifyPost(source.doc);
+
+    source.saving = true;
+    try {
+      var blobSha = await GitHubStore.createBlob(text);
+      var entries = [{ path: path, mode: '100644', type: 'blob', sha: blobSha }];
+      if (oldPath && oldPath !== path) {
+        entries.push({ path: oldPath, mode: '100644', type: 'blob', sha: null });
+      }
+
+      var head = null;
+      try { head = await GitHubStore.branchHead(branch); }
+      catch (e) { if (e.status !== 404) throw e; }
+
+      var base = source.draft && source.draft.base ? source.draft.base : null;
+      var commitSha;
+      if (head) {
+        var headCommit = await GitHubStore.getCommit(head);
+        if (!base) base = (headCommit.parents && headCommit.parents[0] && headCommit.parents[0].sha) || null;
+        var tree = await GitHubStore.createTree(headCommit.tree.sha, entries);
+        var commit = await GitHubStore.createCommit('draft: ' + title, tree, [head]);
+        await GitHubStore.updateRef(branch, commit.sha, false);
+        commitSha = commit.sha;
+      } else {
+        var mainSha = await GitHubStore.headSha('main');
+        base = mainSha;
+        var mainCommit = await GitHubStore.getCommit(mainSha);
+        var tree2 = await GitHubStore.createTree(mainCommit.tree.sha, entries);
+        var c2 = await GitHubStore.createCommit('draft: ' + title, tree2, [mainSha]);
+        try {
+          await GitHubStore.createRef(branch, c2.sha);
+        } catch (e) {
+          if (e.status !== 422 && e.status !== 409) throw e;
+          throw new Error('草稿分支刚被其他窗口创建，请再保存一次');
+        }
+        commitSha = c2.sha;
+      }
+
+      source.path = path;
+      source.name = name;
+      source.sha = blobSha;
+      source.raw = text;
+      source.draft = { branch: branch, base: base, head: commitSha };
+      source.readOnly = false;
+      source.editing = true;
+      source.loaded = true;
+      source.isNew = false;
+      source.dirty = false;
+      source.savedOnce = true;
+      rememberMeta(source, source.doc);
+      if (oldKey && oldKey !== draftKey(source)) {
+        try { localStorage.removeItem(oldKey); } catch (e) { /* 忽略 */ }
+      }
+      clearDraft(source);
+      updateDirtyUI();
+      applyLocks();
+      applyReadOnly();
+      renderList();
+      toast('已保存到草稿 ' + branch, 'ok');
+      return true;
+    } catch (e) {
+      toast('保存草稿失败：' +
+        (e.status === 422 ? '远端已更新，请刷新后重试' : e.message), 'err');
+      return false;
+    } finally {
+      source.saving = false;
+    }
+  }
+
+  /** 把当前草稿发布到 main：差量 tree → 一次 commit → 更新 ref → 删分支 */
+  async function publishGitHubDraft() {
+    var p = state.current;
+    if (!p) return false;
+    if (!p.draft) { toast('请先保存草稿，再发布', 'err'); return false; }
+    if (p.saving) return false;
+    var branch = p.draft.branch;
+    var ok = await openModal({
+      title: '发布到 main？',
+      body: '<p class="tip">会把 <code>' + escapeHtml(branch) + '</code> 合并到 <code>main</code>，' +
+        '然后删除该草稿分支。Netlify 将开始构建，通常 2–4 分钟。</p>',
+      actions: [{ label: '取消', value: null }, { label: '发布', primary: true, value: true }]
+    });
+    if (!ok) return false;
+
+    p.saving = true;
+    try {
+      var mainSha = await GitHubStore.headSha('main');
+      var branchSha = await GitHubStore.branchHead(branch);
+      var diff = await GitHubStore.compare(mainSha, branchSha);
+      var files = (diff && diff.files) || [];
+      if (!files.length) { toast('草稿与 main 没有差异', 'err'); return false; }
+
+      if (p.draft.base && p.draft.base !== mainSha) {
+        var moved = await GitHubStore.compare(p.draft.base, mainSha);
+        var touched = Object.create(null);
+        ((moved && moved.files) || []).forEach(function (f) {
+          touched[f.filename] = true;
+          if (f.previous_filename) touched[f.previous_filename] = true;
+        });
+        var clash = files.filter(function (f) {
+          return touched[f.filename] || (f.previous_filename && touched[f.previous_filename]);
+        });
+        if (clash.length) {
+          toast('main 已更新（' + clash[0].filename + ' 也有改动），请重新打开草稿再发布', 'err');
+          return false;
+        }
+      }
+
+      var entries = [];
+      files.forEach(function (f) {
+        if (f.status === 'renamed' && f.previous_filename) {
+          entries.push({ path: f.previous_filename, mode: '100644', type: 'blob', sha: null });
+        }
+        entries.push({
+          path: f.filename,
+          mode: '100644',
+          type: 'blob',
+          sha: f.status === 'removed' ? null : f.sha
+        });
+      });
+
+      var mainCommit = await GitHubStore.getCommit(mainSha);
+      var tree = await GitHubStore.createTree(mainCommit.tree.sha, entries);
+      var title = String(Core.get(p.doc, 'title') || p.name).trim();
+      var commit = await GitHubStore.createCommit('post: ' + title, tree, [mainSha]);
+      await GitHubStore.updateRef('main', commit.sha, false);
+
+      var mine = files.filter(function (f) { return f.filename === p.path; })[0];
+      if (mine && mine.sha) p.sha = mine.sha;
+      p.draft = null;
+      p.readOnly = true;
+      p.editing = false;
+      p.dirty = false;
+      p.savedOnce = true;
+      clearDraft(p);
+      rememberMeta(p, p.doc);
+      updateDirtyUI();
+      applyReadOnly();
+      renderList();
+      toast('已发布，Netlify 将开始构建', 'ok');
+      GitHubStore.deleteRef(branch).catch(function () { /* 删分支失败不影响发布 */ });
+      return true;
+    } catch (e) {
+      if (e.status === 422) toast('main 已被更新，发布被拒绝，请重新打开草稿', 'err');
+      else toast('发布失败：' + e.message, 'err');
+      return false;
+    } finally {
+      p.saving = false;
+    }
+  }
+
+  /** 把 draft/* 分支合并进列表（一篇草稿一条，和 main 的同名文章合并显示） */
+  async function mergeDraftBranches() {
+    if (state.mode !== 'github') return;
+    var refs;
+    try { refs = await GitHubStore.listDrafts(); } catch (e) { return; }
+    if (!refs.length) { state.draftCount = 0; return; }
+
+    var byAbbr = Object.create(null);
+    state.posts.forEach(function (p) {
+      var a = String(Core.get(p.doc, 'abbrlink') || '').toLowerCase();
+      if (a) byAbbr[a] = p;
+    });
+
+    for (var i = 0; i < refs.length; i += 1) {
+      var ref = refs[i];
+      try {
+        var headCommit = await GitHubStore.getCommit(ref.sha);
+        var base = (headCommit.parents && headCommit.parents[0] && headCommit.parents[0].sha) || null;
+        var items = await GitHubStore.listPostsOn(ref.branch, ref.sha);
+        for (var k = 0; k < items.length; k += 1) {
+          var it = items[k];
+          var text = await GitHubStore.readBlob(it.sha);
+          var doc = Core.parsePost(text);
+          var abbr = String(Core.get(doc, 'abbrlink') || '').toLowerCase();
+          var target = (abbr && byAbbr[abbr]) ||
+            state.posts.filter(function (x) { return x.path === it.path; })[0] || null;
+          if (target === state.current && (target.dirty || target.saving)) continue;
+          if (target) {
+            target.path = it.path;
+            target.name = it.name;
+            target.doc = doc;
+            target.raw = text;
+            target.sha = it.sha;
+            target.loaded = true;
+            target.readOnly = false;
+            target.editing = true;
+            target.draft = { branch: ref.branch, base: base, head: ref.sha };
+            target.meta = metaOf(doc);
+            if (abbr) byAbbr[abbr] = target;
+          } else {
+            var np = {
+              id: uid(),
+              path: it.path,
+              name: it.name,
+              doc: doc,
+              raw: text,
+              sha: it.sha,
+              dirty: false,
+              savedOnce: true,
+              github: true,
+              readOnly: false,
+              editing: true,
+              loaded: true,
+              draft: { branch: ref.branch, base: base, head: ref.sha }
+            };
+            np.meta = metaOf(np.doc);
+            if (abbr) byAbbr[abbr] = np;
+            state.posts.push(np);
+          }
+        }
+      } catch (e) { /* 单个分支失败不影响其余 */ }
+    }
+    state.draftCount = refs.length;
+    reindex();
+    renderList();
+  }
+
+  /** GitHub 模式下新建文章：只存在于内存，第一次保存才建草稿分支 */
+  async function newGitHubPost() {
+    commitCurrentDraft();
+    var title = await promptText('新建文章', '标题 title', '', '文章标题');
+    if (title == null) return;
+    var now = new Date();
+    var doc = Core.createPost({ title: title, description: '', tags: [], cover: '' });
+    Core.set(doc, 'date', Core.formatDateTime(now));
+    Core.set(doc, 'abbrlink', Core.allocateAbbrlink(title, usedAbbrlinks(null)));
+    var name = unusedName(Core.suggestFilename(title, now, 'yy'));
+    var p = {
+      id: uid(),
+      path: GitHubStore.postsDir + name,
+      name: name,
+      doc: doc,
+      raw: '',
+      dirty: true,
+      savedOnce: false,
+      isNew: true,
+      github: true,
+      readOnly: false,
+      editing: true,
+      loaded: true
+    };
+    state.posts.unshift(p);
+    openPost(p, { skipDraftCheck: true });
+    form.fileName.select();
+    toast('新文章：保存后创建草稿分支 draft/' + Core.get(doc, 'abbrlink'));
   }
 
   /** 启动时先问工作方式 */
@@ -2433,6 +2747,8 @@
       return;
     }
 
+    if (state.mode === 'github') return saveGitHubDraft(source, opts);
+
     var requestedName = form.fileName.value;
     var name = opts.name == null ? requestedName.trim() : String(opts.name).trim();
     if (!name) {
@@ -2566,6 +2882,7 @@
   }
 
   async function newPost() {
+    if (state.mode === 'github') return newGitHubPost();
     commitCurrentDraft();
     var title = await promptText('新建文章', '标题 title', '', '文章标题');
     if (title == null) return;
@@ -3240,6 +3557,8 @@
     };
 
     /* --- 保存 / 另存 / 复制 / 删除 --- */
+    $('#btn-edit').onclick = function () { enterDraftMode(); };
+    $('#btn-publish').onclick = function () { publishGitHubDraft(); };
     $('#btn-save').onclick = function () { savePost(); };
     $('#btn-saveas').onclick = async function () {
       var p = state.current;

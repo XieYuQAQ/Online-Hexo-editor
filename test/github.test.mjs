@@ -260,3 +260,214 @@ async function waitFor(fn, label, timeout) {
   console.log(`[github] ${checks - failed}/${checks} 通过`);
   if (failed) process.exitCode = 1;
 }
+
+/* ---------------- 3. 编辑 → 保存草稿分支 → 发布 ---------------- */
+
+/** 一个够用的内存 Git：blob / tree / commit / ref，行为按 GitHub 的几个端点模拟 */
+function makeGitServer(posts) {
+  const blobs = new Map(), trees = new Map(), commits = new Map(), refs = new Map();
+  let seq = 0;
+  const nid = (c) => c + (++seq);
+  const setBlob = (text) => { const sha = nid('b'); blobs.set(sha, text); return sha; };
+  const setTree = (entries) => { const sha = nid('t'); trees.set(sha, new Map(entries)); return sha; };
+  const setCommit = (message, tree, parents) => {
+    const sha = nid('c'); commits.set(sha, { message, tree, parents }); return sha;
+  };
+
+  const seed = new Map();
+  posts.forEach((p) => seed.set('source/_posts/' + p.name, setBlob(rawOf(p))));
+  const firstTree = setTree(seed);
+  const firstCommit = setCommit('init', firstTree, []);
+  refs.set('main', firstCommit);
+
+  const treeOf = (sha) => {
+    const c = commits.get(sha);
+    return new Map(trees.get(c ? c.tree : sha) || new Map());
+  };
+
+  function diff(base, head) {
+    const a = treeOf(base), b = treeOf(head);
+    const files = [];
+    new Set([...a.keys(), ...b.keys()]).forEach((p) => {
+      const x = a.get(p), y = b.get(p);
+      if (x === y) return;
+      if (x && !y) files.push({ filename: p, status: 'removed', sha: null });
+      else if (!x && y) files.push({ filename: p, status: 'added', sha: y });
+      else files.push({ filename: p, status: 'modified', sha: y });
+    });
+    return { files, ahead_by: files.length };
+  }
+
+  function handle(rawUrl, init) {
+    const method = (init && init.method) || 'GET';
+    const u = String(rawUrl);
+    const q = u.indexOf('?');
+    const clean = q === -1 ? u : u.slice(0, q);
+    const rel = clean.replace(API, '');
+    const body = init && init.body ? JSON.parse(init.body) : null;
+    let m;
+
+    if (rel === '' || rel === '/') {
+      return jsonRes({ full_name: REPO, default_branch: 'main', private: true, permissions: { push: true } });
+    }
+    if (method === 'GET' && (m = rel.match(/^\/git\/ref\/heads\/(.+)$/))) {
+      const branch = decodeURIComponent(m[1]);
+      const sha = refs.get(branch);
+      return sha
+        ? jsonRes({ ref: 'refs/heads/' + branch, object: { sha } })
+        : jsonRes({ message: 'Not Found' }, 404);
+    }
+    if (method === 'GET' && rel === '/git/matching-refs/heads/draft/') {
+      return jsonRes([...refs.keys()].filter((b) => b.startsWith('draft/'))
+        .map((b) => ({ ref: 'refs/heads/' + b, object: { sha: refs.get(b) } })));
+    }
+    if (method === 'GET' && (m = rel.match(/^\/git\/trees\/(.+)$/))) {
+      const map = treeOf(decodeURIComponent(m[1]));
+      return jsonRes({
+        sha: m[1],
+        tree: [...map.entries()].map(([p, sha]) => ({ path: p, mode: '100644', type: 'blob', sha, size: 1 }))
+      });
+    }
+    if (method === 'GET' && (m = rel.match(/^\/git\/blobs\/(.+)$/))) {
+      const text = blobs.get(decodeURIComponent(m[1]));
+      return text === undefined
+        ? jsonRes({ message: 'Not Found' }, 404)
+        : jsonRes({ sha: m[1], encoding: 'base64', content: Buffer.from(text, 'utf8').toString('base64') });
+    }
+    if (method === 'GET' && (m = rel.match(/^\/git\/commits\/(.+)$/))) {
+      const c = commits.get(decodeURIComponent(m[1]));
+      return c
+        ? jsonRes({ sha: m[1], tree: { sha: c.tree }, parents: c.parents.map((s) => ({ sha: s })), message: c.message })
+        : jsonRes({ message: 'Not Found' }, 404);
+    }
+    if (method === 'GET' && (m = rel.match(/^\/compare\/(.+)\.\.\.(.+)$/))) {
+      return jsonRes(diff(decodeURIComponent(m[1]), decodeURIComponent(m[2])));
+    }
+    if (method === 'GET' && (m = rel.match(/^\/contents\/(.+)$/))) {
+      const p = decodeURIComponent(m[1]);
+      const branch = (/[?&]ref=([^&]+)/.exec(u) || [])[1] || 'main';
+      const sha = treeOf(refs.get(branch)).get(p);
+      if (!sha) return jsonRes({ message: 'Not Found' }, 404);
+      return jsonRes({ sha, encoding: 'base64', content: Buffer.from(blobs.get(sha), 'utf8').toString('base64') });
+    }
+    if (method === 'POST' && rel === '/git/blobs') return jsonRes({ sha: setBlob(body.content) });
+    if (method === 'POST' && rel === '/git/trees') {
+      const map = treeOf(body.base_tree);
+      (body.tree || []).forEach((e) => {
+        if (e.sha === null) map.delete(e.path);
+        else map.set(e.path, e.sha);
+      });
+      return jsonRes({ sha: setTree(map) });
+    }
+    if (method === 'POST' && rel === '/git/commits') {
+      return jsonRes({ sha: setCommit(body.message, body.tree, body.parents || []) });
+    }
+    if (method === 'POST' && rel === '/git/refs') {
+      const branch = String(body.ref).replace(/^refs\/heads\//, '');
+      if (refs.has(branch)) return jsonRes({ message: 'Reference already exists' }, 422);
+      refs.set(branch, body.sha);
+      return jsonRes({ ref: body.ref, object: { sha: body.sha } }, 201);
+    }
+    if (method === 'PATCH' && (m = rel.match(/^\/git\/refs\/heads\/(.+)$/))) {
+      const branch = decodeURIComponent(m[1]);
+      if (!refs.has(branch)) return jsonRes({ message: 'Not Found' }, 404);
+      refs.set(branch, body.sha);
+      return jsonRes({ ref: 'refs/heads/' + branch, object: { sha: body.sha } });
+    }
+    if (method === 'DELETE' && (m = rel.match(/^\/git\/refs\/heads\/(.+)$/))) {
+      refs.delete(decodeURIComponent(m[1]));
+      return jsonRes({});
+    }
+    return jsonRes({ message: 'not mocked: ' + method + ' ' + rel }, 404);
+  }
+
+  return { handle, blobs, trees, commits, refs, firstCommit, treeOf };
+}
+
+{
+  const dom = await boot();
+  const w = dom.window;
+  const d = w.document;
+  const server = makeGitServer(POSTS);
+  w.fetch = (url, init) => server.handle(url, init);
+
+  const ghCard = Array.from(d.querySelectorAll('.ws-card')).find((b) => /GitHub/.test(b.textContent));
+  ghCard.click();
+  await waitFor(() => d.querySelectorAll('#post-list li').length === 3, '进入 GitHub 列表');
+  await waitFor(() => d.querySelector('#post-list li .p-title').textContent === '排序测试', '标题已填充');
+
+  /* 打开 main 上的文章 */
+  d.querySelectorAll('#post-list li')[0].click();
+  await waitFor(() => d.querySelector('#body').textContent.indexOf('正文三十') !== -1, '正文渲染');
+  check(!d.querySelector('#btn-edit').classList.contains('hidden'), '只读时显示「编辑」');
+  check(d.querySelector('#btn-save').classList.contains('hidden'), '只读时隐藏「保存」');
+  check(d.querySelector('#btn-publish').classList.contains('hidden'), '还没草稿时隐藏「发布」');
+
+  /* 点编辑：进入可编辑态，但还没有分支 */
+  d.querySelector('#btn-edit').click();
+  check(d.querySelector('#btn-edit').classList.contains('hidden'), '点编辑后隐藏「编辑」');
+  check(!d.querySelector('#btn-save').classList.contains('hidden'), '点编辑后显示「保存」');
+  check(d.querySelector('#readonly-hint').textContent === '草稿 · 未保存', '提示「草稿 · 未保存」',
+    d.querySelector('#readonly-hint').textContent);
+  check(!server.refs.has('draft/aaa111'), '仅点编辑不会创建分支');
+
+  /* 第一次保存 → 创建 draft/<abbrlink> */
+  const titleInput = d.querySelector('#f-title');
+  titleInput.value = '排序测试（改）';
+  titleInput.dispatchEvent(new w.Event('input', { bubbles: true }));
+  d.querySelector('#btn-save').click();
+  await waitFor(() => server.refs.has('draft/aaa111'), '保存后创建草稿分支');
+
+  const head1 = server.refs.get('draft/aaa111');
+  const c1 = server.commits.get(head1);
+  check(c1.parents[0] === server.firstCommit, '草稿首个提交的父提交 = main HEAD', c1.parents.join(','));
+  const text1 = server.blobs.get(server.treeOf(head1).get('source/_posts/30 排序测试.md'));
+  check(text1.indexOf('title: 排序测试（改）') !== -1, '草稿里是改后的标题');
+  check(!d.querySelector('#btn-publish').classList.contains('hidden'), '保存后出现「发布」');
+  check(d.querySelector('#readonly-hint').textContent === '草稿 · draft/aaa111', '提示草稿分支名',
+    d.querySelector('#readonly-hint').textContent);
+  const badge = d.querySelector('#post-list li .p-badge');
+  check(!!badge && badge.textContent === '草稿', '列表挂「草稿」标签');
+
+  /* 第二次保存 → 更新同一个分支，parent 是上一次的提交 */
+  const desc = d.querySelector('#f-description');
+  desc.value = '第二次保存';
+  desc.dispatchEvent(new w.Event('input', { bubbles: true }));
+  d.querySelector('#btn-save').click();
+  await waitFor(() => server.refs.get('draft/aaa111') !== head1, '第二次保存更新分支');
+  const head2 = server.refs.get('draft/aaa111');
+  check(server.commits.get(head2).parents[0] === head1, '第二次提交基于上一次草稿', JSON.stringify(server.commits.get(head2).parents));
+  check(server.refs.get('main') === server.firstCommit, '保存不影响 main');
+
+  /* 发布 → 一次 commit 合并到 main，再删掉分支 */
+  const beforePublish = [...server.commits.keys()].length;
+  d.querySelector('#btn-publish').click();
+  await waitFor(() => !d.querySelector('#modal').classList.contains('hidden'), '发布确认弹窗');
+  check(d.querySelector('#modal-title').textContent === '发布到 main？', '弹窗标题',
+    d.querySelector('#modal-title').textContent);
+  const pubBtn = Array.from(d.querySelectorAll('#modal-foot .btn')).find((b) => b.textContent === '发布');
+  check(!!pubBtn, '弹窗里有「发布」按钮');
+  pubBtn.click();
+  await waitFor(() => !server.refs.has('draft/aaa111') && server.refs.get('main') !== server.firstCommit, '发布完成');
+
+  const mainHead = server.refs.get('main');
+  const mc = server.commits.get(mainHead);
+  check(mc.message === 'post: 排序测试（改）', 'main 提交信息', mc.message);
+  check(mc.parents[0] === server.firstCommit, 'main 提交只有一个新 parent');
+  const mainText = server.blobs.get(server.treeOf(mainHead).get('source/_posts/30 排序测试.md'));
+  check(mainText.indexOf('title: 排序测试（改）') !== -1, 'main 上已是改后的标题');
+  check(mainText.indexOf('第二次保存') !== -1, 'main 上带着第二次保存的内容');
+  const posts = [...server.commits.values()].filter((c) => /^post: /.test(c.message));
+  check(posts.length === 1, '一次发布只产生一个提交', String(posts.length));
+  check([...server.commits.keys()].length >= beforePublish, '发布没有重写历史');
+
+  check(d.querySelector('#readonly-hint').textContent === '只读 · main', '发布后回到只读提示',
+    d.querySelector('#readonly-hint').textContent);
+  check(d.querySelector('#btn-save').classList.contains('hidden'), '发布后隐藏「保存」');
+  check(!d.querySelector('#btn-edit').classList.contains('hidden'), '发布后显示「编辑」');
+  check(!d.querySelector('#post-list li .p-badge'), '发布后草稿标签消失');
+
+  console.log(`[github] ${checks - failed}/${checks} 通过`);
+  if (failed) process.exitCode = 1;
+}
+

@@ -153,6 +153,104 @@
     });
   }
 
+  /* ---------------- 写操作（草稿分支 / 发布） ---------------- */
+
+  /** 建 blob，返回 sha（文本按 utf-8 直接交给 GitHub，省一次 base64） */
+  function createBlob(text) {
+    return request('/git/blobs', {
+      method: 'POST',
+      body: { content: String(text == null ? '' : text), encoding: 'utf-8' },
+    }).then(function (data) { return data.sha; });
+  }
+
+  /** 以 baseTree 为底，覆盖/删除若干文件，返回新 tree sha */
+  function createTree(baseTree, entries) {
+    return request('/git/trees', {
+      method: 'POST',
+      body: { base_tree: baseTree, tree: entries },
+    }).then(function (data) { return data.sha; });
+  }
+
+  function createCommit(message, tree, parents) {
+    return request('/git/commits', {
+      method: 'POST',
+      body: { message: message, tree: tree, parents: parents },
+    });
+  }
+
+  function createRef(branch, sha) {
+    return request('/git/refs', {
+      method: 'POST',
+      body: { ref: 'refs/heads/' + branch, sha: sha },
+    });
+  }
+
+  function updateRef(branch, sha, force) {
+    return request('/git/refs/heads/' + branch, {
+      method: 'PATCH',
+      body: { sha: sha, force: !!force },
+    });
+  }
+
+  function deleteRef(branch) {
+    return request('/git/refs/heads/' + branch, { method: 'DELETE' });
+  }
+
+  function getCommit(sha) {
+    return request('/git/commits/' + sha);
+  }
+
+  function getTree(sha) {
+    return request('/git/trees/' + sha + '?recursive=1').then(function (tree) {
+      return tree.tree || [];
+    });
+  }
+
+  function compare(base, head) {
+    return request('/compare/' + base + '...' + head);
+  }
+
+  /** 所有 draft/* 分支（refs/heads/draft/xxx） */
+  function listDrafts() {
+    return request('/git/matching-refs/heads/draft/').then(function (refs) {
+      return (refs || []).filter(function (r) {
+        return r && r.ref && /^refs\/heads\/draft\//.test(r.ref) && r.object && r.object.sha;
+      }).map(function (r) {
+        return {
+          branch: r.ref.replace(/^refs\/heads\//, ''),
+          sha: r.object.sha,
+        };
+      });
+    });
+  }
+
+  /** 分支 HEAD 指向的 commit sha（不存在时抛 404） */
+  function branchHead(branch) {
+    return headSha(branch);
+  }
+
+  /** 分支是否存在 */
+  function branchExists(branch) {
+    return headSha(branch).then(function () { return true; }).catch(function (e) {
+      if (e.status === 404) return false;
+      throw e;
+    });
+  }
+
+  /** 分支上 source/_posts 里的 Markdown */
+  function listPostsOn(branch, head) {
+    var headPromise = head ? Promise.resolve(head) : headSha(branch);
+    return headPromise.then(function (sha) {
+      return getTree(sha).then(function (tree) {
+        return tree.filter(function (n) {
+          return n.type === 'blob' && n.path.indexOf(POSTS_DIR) === 0 && /\.md$/i.test(n.path);
+        }).map(function (n) {
+          return { path: n.path, name: n.path.slice(POSTS_DIR.length), sha: n.sha, size: n.size };
+        });
+      });
+    });
+  }
+
   root.GitHubStore = {
     repo: REPO,
     postsDir: POSTS_DIR,
@@ -163,6 +261,19 @@
     readBlob: readBlob,
     readBlobs: readBlobs,
     readPost: readPost,
+    createBlob: createBlob,
+    createTree: createTree,
+    createCommit: createCommit,
+    createRef: createRef,
+    updateRef: updateRef,
+    deleteRef: deleteRef,
+    getCommit: getCommit,
+    getTree: getTree,
+    compare: compare,
+    listDrafts: listDrafts,
+    branchHead: branchHead,
+    branchExists: branchExists,
+    listPostsOn: listPostsOn,
     request: request,
     decodeBase64: decodeBase64,
     encodeBase64: encodeBase64,

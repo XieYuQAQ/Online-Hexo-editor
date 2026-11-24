@@ -185,6 +185,18 @@ body {
   font-size: 11px;
   color: var(--fg-faint);
 }
+.post-list .p-badge {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 10px;
+  line-height: 16px;
+  vertical-align: 1px;
+  color: var(--accent);
+  background: rgba(110, 168, 254, .14);
+  border: 1px solid rgba(110, 168, 254, .3);
+}
 .post-list .p-meta .p-tags { color: var(--accent); opacity: .8; }
 .post-list li.dirty .p-title::after {
   content: "●";
