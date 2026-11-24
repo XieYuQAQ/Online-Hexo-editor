@@ -1670,6 +1670,7 @@
   var TABLE_TPL = '| 列 1 | 列 2 | 列 3 |\n|:---|:---:|---:|\n| 内容 | 内容 | 内容 |\n| 内容 | 内容 | 内容 |';
 
   function action(name) {
+    if (state.readOnly) { toast('main 分支只读，请先创建草稿', 'err'); return; }
     var ta = form.body;
     switch (name) {
       case 'bold': return wrap('**', '**', '加粗文字');
