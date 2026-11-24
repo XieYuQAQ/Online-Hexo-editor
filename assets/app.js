@@ -901,6 +901,33 @@
     return true;
   }
 
+  /** 从 GitHub 切回已经连过的本地目录（必要时补一次授权） */
+  async function resumeLocal() {
+    var h = state.root || state.postsDir;
+    if (!h) { maybeOpenDirGuide(); return false; }
+    try {
+      if (h.queryPermission) {
+        var perm = await h.queryPermission({ mode: 'readwrite' });
+        if (perm !== 'granted' && h.requestPermission) {
+          perm = await h.requestPermission({ mode: 'readwrite' });
+        }
+        if (perm !== 'granted') {
+          toast('目录需要重新授权，请重新选择一次', 'err');
+          maybeOpenDirGuide();
+          return false;
+        }
+      }
+      if (state.current) closeEditor();
+      await FS.attach(h);
+      toast('已切回本地目录：' + (state.dirName || ''), 'ok');
+      return true;
+    } catch (e) {
+      toast('切回本地目录失败：' + e.message, 'err');
+      maybeOpenDirGuide();
+      return false;
+    }
+  }
+
   /** 点左下角 GitHub 状态：仓库信息 / 重新读取 / 换回本地目录 */
   function openGitHubInfo() {
     var body = el('div', { class: 'guide' }, [
@@ -931,10 +958,26 @@
     var box = el('div', { class: 'ws-chooser' }, [
       card('本地目录', '直接读写磁盘上的 source/_posts，和以前一样', function () {
         $('#modal').classList.add('hidden');
+        if (state.mode === 'fs') { toast('当前已经在本地目录模式'); return; }
+        if (state.postsDir) { resumeLocal(); return; }
         maybeOpenDirGuide();
       }),
       card('GitHub 仓库', '草稿存到分支，发布时合并到 main', function () {
         $('#modal').classList.add('hidden');
+        if (state.mode === 'github') { toast('已经连接到 GitHub 仓库'); return; }
+        if (state.posts.some(function (p) { return p.dirty; })) {
+          openModal({
+            title: '切换到 GitHub 仓库？',
+            body: '<p class="tip">本地还有未保存的修改。这些修改会留在草稿里，切回本地目录时可以恢复，但不会写回磁盘。</p>',
+            actions: [
+              { label: '取消', value: null },
+              { label: '直接切换', primary: true, danger: true, value: 'go' }
+            ]
+          }).then(function (v) {
+            if (v === 'go') enterGitHub();
+          });
+          return;
+        }
         enterGitHub();
       })
     ]);
@@ -2752,12 +2795,16 @@
 
     var isGH = state.mode === 'github';
     if (gh) {
-      gh.classList.toggle('hidden', !isGH);
+      // 这个入口常驻：本地模式下是灰色「GitHub」，点它就能切过去
+      gh.classList.remove('hidden');
+      gh.classList.toggle('on', isGH);
+      var label = gh.querySelector('span');
       if (isGH) {
-        gh.classList.add('on');
-        var label = gh.querySelector('span');
         if (label) label.textContent = 'GitHub · ' + state.posts.length + ' 篇';
         gh.title = '已连接 ' + (state.githubRepo || '') + ' · main（点击查看）';
+      } else {
+        if (label) label.textContent = 'GitHub';
+        gh.title = '当前是本地目录，点击切换到 GitHub 仓库';
       }
     }
     p.classList.toggle('hidden', isGH);
@@ -2848,7 +2895,7 @@
       box.appendChild(el('p', {
         class: 'tip',
         html: '选一次就好，浏览器会记住这两个目录，下次打开自动恢复。' +
-          '<br>想换目录，点左下角的两个圆点随时回来。'
+          '<br>想换目录，点左下角的圆点随时回来。'
       }));
       box.appendChild(rowOf('posts'));
       box.appendChild(rowOf('images'));
@@ -2911,6 +2958,9 @@
     var actions = [];
     if (legacyDrafts().length) actions.push({ label: '导入旧版草稿', value: 'legacy' });
     if (!hasFSA) actions.push({ label: '导入文件夹', value: 'import' });
+    if (state.mode !== 'github') {
+      actions.push({ label: '改用 GitHub 仓库', onClick: function () { setTimeout(openWorkspaceChooser, 0); } });
+    }
     actions.push({ label: '进入编辑器', primary: true, value: true });
 
     return openModal({
@@ -2985,7 +3035,10 @@
     $('#dot-posts').onclick = function () { openDirGuide(); };
     $('#dot-images').onclick = function () { openDirGuide(); };
     var dotGh = $('#dot-github');
-    if (dotGh) dotGh.onclick = function () { openGitHubInfo(); };
+    if (dotGh) dotGh.onclick = function () {
+      if (state.mode === 'github') openGitHubInfo();
+      else openWorkspaceChooser();
+    };
 
     /* --- 侧栏收起 / 展开 --- */
     $('#btn-toggle-sidebar').onclick = toggleSidebar;

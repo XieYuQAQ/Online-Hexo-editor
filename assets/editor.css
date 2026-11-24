@@ -216,7 +216,7 @@ body {
 .save-state.dirty { color: var(--warn); }
 
 /* 目录连接状态圆点：绿=已连接，红=未连接 */
-.dir-dots { display: flex; gap: 10px; }
+.dir-dots { display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; row-gap: 4px; }
 .dir-dot {
   display: inline-flex;
   align-items: center;
@@ -229,6 +229,7 @@ body {
   color: var(--fg-faint);
   cursor: pointer;
   transition: color .15s;
+  white-space: nowrap;
 }
 .dir-dot:hover { color: var(--fg); }
 .dot-i {

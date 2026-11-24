@@ -128,7 +128,20 @@ async function waitFor(fn, label, timeout) {
 
   const ghCard = Array.from(d.querySelectorAll('.ws-card')).find((b) => /GitHub/.test(b.textContent));
   check(!!ghCard, '启动选择器里有「GitHub 仓库」', d.querySelector('#modal-body')?.textContent);
-  ghCard.click();
+
+  /* 入口常驻：关掉启动弹窗后，左下角仍能再次切换工作方式 */
+  d.querySelector('#modal-close').click();
+  await waitFor(() => d.querySelector('#modal').classList.contains('hidden'), '关闭启动选择器');
+  const ghEntry = d.querySelector('#dot-github');
+  check(!!ghEntry && !ghEntry.classList.contains('hidden'), '本地/未连接时也常驻 GitHub 入口');
+  check(!ghEntry.classList.contains('on'), '未连接时 GitHub 入口是灰的');
+  check(ghEntry.textContent.trim() === 'GitHub', '未连接时标签只有 GitHub', ghEntry.textContent.trim());
+  ghEntry.click();
+  await waitFor(() => !d.querySelector('#modal').classList.contains('hidden'), '点入口重新打开工作方式');
+  check(d.querySelector('#modal-title').textContent === '选择工作方式', '入口打开「选择工作方式」',
+    d.querySelector('#modal-title').textContent);
+  const card2 = Array.from(d.querySelectorAll('.ws-card')).find((b) => /GitHub/.test(b.textContent));
+  card2.click();
 
   await waitFor(() => d.querySelectorAll('#post-list li').length === 3, '列表渲染出 3 篇');
   await waitFor(() => {
@@ -192,6 +205,9 @@ async function waitFor(fn, label, timeout) {
   await waitFor(() => !d.querySelector('#modal').classList.contains('hidden'), '仓库信息弹窗打开');
   check(d.querySelector('#modal-title').textContent === 'GitHub 仓库', '弹窗标题为「GitHub 仓库」',
     d.querySelector('#modal-title').textContent);
+  const infoBtns = Array.from(d.querySelectorAll('#modal-foot .btn')).map((b) => b.textContent);
+  check(infoBtns.indexOf('切换为本地目录') !== -1, '仓库信息里可切回本地目录', infoBtns.join(' | '));
+  check(infoBtns.indexOf('重新读取') !== -1, '仓库信息里可重新读取', infoBtns.join(' | '));
   d.querySelector('#modal-close').click();
   await waitFor(() => d.querySelector('#modal').classList.contains('hidden'), '弹窗关闭');
 
