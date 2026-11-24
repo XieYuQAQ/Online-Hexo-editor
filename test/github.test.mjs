@@ -890,3 +890,46 @@ function makeGitServer(posts, opts) {
   if (failed) process.exitCode = 1;
 }
 
+/* ---------------- 9. 删掉引用后发布：弹窗确认并删除孤儿图 ---------------- */
+{
+  const IMG = 'source/images/2026/10/aaaa.jpg';
+  const postsWithRef = POSTS.map((p, i) => (i === 0
+    ? { ...p, body: p.body + '\n\n![](/images/2026/10/aaaa.jpg)' }
+    : p));
+  const server = makeGitServer(postsWithRef, {
+    images: [{ path: IMG }],
+    draft: {
+      branch: 'draft/aaa111',
+      files: { 'source/_posts/30 排序测试.md': rawOf(POSTS[0]) }   // 移除了图片引用
+    }
+  });
+  const dom = await bootWithServer(server);
+  const w = dom.window, d = w.document;
+
+  d.querySelectorAll('#post-list li')[0].click();
+  await waitFor(() => d.querySelector('#f-title').value === '排序测试', '打开草稿');
+  check(d.querySelector('#readonly-hint').textContent === '草稿 · draft/aaa111', '是草稿');
+
+  d.querySelector('#btn-publish').click();
+  await waitFor(() => !d.querySelector('#modal').classList.contains('hidden'), '发布确认');
+  Array.from(d.querySelectorAll('#modal-foot .btn')).find((b) => b.textContent === '发布').click();
+
+  // 孤儿图确认框
+  await waitFor(() => d.querySelector('#modal-title').textContent === '这些图片发布后不再被引用', '孤儿图确认框',
+    d.querySelector('#modal-title').textContent);
+  check(d.querySelectorAll('#modal .img-check').length === 1, '列出 1 张孤儿图');
+  check(d.querySelector('#modal .img-check input').checked === true, '默认勾选删除');
+
+  Array.from(d.querySelectorAll('#modal-foot .btn')).find((b) => b.textContent === '删除选中并发布').click();
+  await waitFor(() => !server.refs.has('draft/aaa111'), '发布完成');
+  await waitFor(() => d.querySelector('#busy').classList.contains('hidden'), '遮罩消失');
+
+  const mainTree = server.treeOf(server.refs.get('main'));
+  check(!mainTree.has(IMG), '孤儿图已从 main 删除');
+  check(server.commits.get(server.refs.get('main')).message.indexOf('图片删除') !== -1,
+    '提交信息标注图片删除', server.commits.get(server.refs.get('main')).message);
+
+  console.log(`[github] ${checks - failed}/${checks} 通过`);
+  if (failed) process.exitCode = 1;
+}
+

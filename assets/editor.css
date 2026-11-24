@@ -310,6 +310,10 @@ html[data-theme="light"] .post-list .p-badge-del {
 }
 .img-empty { padding: 18px; text-align: center; font-size: 12px; color: var(--fg-faint); }
 .img-foot { font-size: 11px; color: var(--fg-faint); }
+.img-check-list { display: flex; flex-direction: column; gap: 4px; max-height: 40vh; overflow: auto; }
+.img-check { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--fg-dim); }
+.img-check input { accent-color: var(--accent); }
+.img-check span { word-break: break-all; }
 .img-refs {
   flex-basis: 100%;
   margin: 4px 0 2px 56px;

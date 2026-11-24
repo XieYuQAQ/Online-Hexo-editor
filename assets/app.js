@@ -863,6 +863,115 @@
     return found;
   }
 
+  /** 从文本里抽出图片文件名（小写，&amp; 还原） */
+  function extractImageBases(text) {
+    var out = Object.create(null);
+    var re = /[A-Za-z0-9_.\-~@+!^&%]+\.(?:png|jpe?g|gif|webp|avif|svg|bmp|ico)/gi;
+    var m;
+    var s = String(text || '').toLowerCase().replace(/&amp;/g, '&');
+    while ((m = re.exec(s))) out[m[0]] = true;
+    return out;
+  }
+
+  /** 本次发布会删掉哪些图片的最后一个引用（→ 变成孤儿） */
+  async function orphanedImagesAfterPublish(applied) {
+    if (!imgState.images.length) {
+      try { imgState.images = await loadImageList(); } catch (e) { return []; }
+    }
+    var bases = imgState.images.map(function (x) { return imgBase(x.path); });
+    var byBase = Object.create(null);
+    imgState.images.forEach(function (x) { byBase[imgBase(x.path)] = x.path; });
+
+    var changed = [];   // { path, oldBases, newBases, text }
+    for (var i = 0; i < applied.length; i += 1) {
+      var files = applied[i].files || [];
+      for (var k = 0; k < files.length; k += 1) {
+        var f = files[k];
+        if (!/\.md$/i.test(f.filename) || f.status === 'removed') continue;
+        var newText;
+        try { newText = await GitHubStore.readBlob(f.sha); } catch (e) { continue; }
+        var oldBases = Object.create(null);
+        if (f.status === 'modified') {
+          try { oldBases = extractImageBases((await GitHubStore.readPost(f.filename, 'main')).text); } catch (e) { /* 忽略 */ }
+        }
+        changed.push({ path: f.filename, oldBases: oldBases, newBases: extractImageBases(newText), text: newText });
+      }
+    }
+    if (!changed.length) return [];
+
+    var overrides = Object.create(null);
+    changed.forEach(function (c) { overrides[c.path] = c.text; });
+
+    // 重建「发布后」的引用：被改动的文本用新内容，其余用 main 旧内容；再叠加未发布的草稿改动
+    var mainSha = await GitHubStore.headSha('main');
+    var mainFiles = await GitHubStore.listTextFiles('main', mainSha);
+    var drafts = await GitHubStore.listDrafts();
+    var items = [];
+    mainFiles.forEach(function (tf) {
+      if (overrides[tf.path] !== undefined) items.push({ path: tf.path, text: overrides[tf.path] });
+      else items.push({ path: tf.path, sha: tf.sha });
+    });
+    for (var d = 0; d < drafts.length; d += 1) {
+      var diff = await GitHubStore.compare('main', drafts[d].sha);
+      ((diff && diff.files) || []).forEach(function (f2) {
+        if (f2.status === 'removed' || !f2.sha) return;
+        if (!/\.md$/i.test(f2.filename) || overrides[f2.filename] !== undefined) return;
+        items.push({ path: f2.filename, sha: f2.sha });
+      });
+    }
+
+    var found = Object.create(null);
+    function absorb(path, text) {
+      var b = extractImageBases(text);
+      for (var t = 0; t < bases.length; t += 1) {
+        if (b[bases[t]]) (found[bases[t]] = found[bases[t]] || []).push(path);
+      }
+    }
+    var toRead = items.filter(function (x) { return x.sha; });
+    setBusyText('正在核对图片引用…');
+    await GitHubStore.readBlobs(toRead, function (item, text) { absorb(item.path, text); }, { concurrency: 6 });
+    items.forEach(function (x) { if (x.text !== undefined) absorb(x.path, x.text); });
+
+    var orphan = [];
+    changed.forEach(function (c) {
+      Object.keys(c.oldBases).forEach(function (b) {
+        if (c.newBases[b]) return;
+        if (byBase[b] && !(found[b] && found[b].length)) orphan.push(byBase[b]);
+      });
+    });
+    return orphan.filter(function (p, idx) { return orphan.indexOf(p) === idx; });
+  }
+
+  /** 发布前弹窗：勾选要一并删除的图片，返回选中路径数组 / 空数组（不删）/ null（取消发布） */
+  function confirmPublishImages(paths) {
+    return new Promise(function (resolve) {
+      var checks = paths.map(function (p) {
+        var cb = el('input', { type: 'checkbox' });
+        cb.checked = true;
+        return { path: p, cb: cb, row: el('label', { class: 'img-check' }, [
+          cb, el('span', { text: '/' + p.replace(/^source\//, '') })
+        ]) };
+      });
+      openModal({
+        title: '这些图片发布后不再被引用',
+        body: el('div', {}, [
+          el('p', { class: 'tip', text: '下面 ' + paths.length + ' 张图片在发布后将不再被任何文本引用。' +
+            '勾选的一并删除；不删也可以在「图片管理」里稍后清理。' }),
+          el('div', { class: 'img-check-list' }, checks.map(function (c) { return c.row; }))
+        ]),
+        actions: [
+          { label: '取消发布', value: null },
+          { label: '只发布，不删图', value: 'keep' },
+          { label: '删除选中并发布', primary: true, value: 'del' }
+        ]
+      }).then(function (v) {
+        if (v === null || v === undefined) { resolve(null); return; }
+        if (v === 'keep') { resolve([]); return; }
+        resolve(checks.filter(function (c) { return c.cb.checked; }).map(function (c) { return c.path; }));
+      });
+    });
+  }
+
   function renderImageList() {
     var box = imgDom.list;
     if (!box) return;
@@ -1231,7 +1340,8 @@
    * 以当前 main 的 tree 为底，只叠加这些分支改过的文件 → 一个 commit → 更新 ref → 删分支。
    * 有任何冲突就整体拒绝，不会只发布一半。
    */
-  async function publishDraftBranches(branches) {
+  async function publishDraftBranches(branches, opts) {
+    opts = opts || {};
     if (!branches || !branches.length) return false;
     setBusyText('发布：比对变更');
     var mainSha = await GitHubStore.headSha('main');
@@ -1298,6 +1408,25 @@
       entries.push({ path: path, mode: '100644', type: 'blob', sha: null });
     });
 
+    // §8.6：本次改动删掉最后引用 → 变成孤儿的图片，弹窗确认是否一并删除
+    var removeImgs = [];
+    if (!opts.skipOrphanCheck) {
+      var orphans = await orphanedImagesAfterPublish(applied);
+      if (orphans.length) {
+        hideBusy();
+        var decision = await confirmPublishImages(orphans);
+        showBusy('正在发布到 main…');
+        if (decision === null) { toast('已取消发布', 'err'); return false; }
+        removeImgs = decision;
+      }
+    }
+    removeImgs.forEach(function (path) {
+      if (!seen[path]) {
+        seen[path] = 'orphan';
+        entries.push({ path: path, mode: '100644', type: 'blob', sha: null });
+      }
+    });
+
     var titles = applied.map(function (a) {
       return a.post
         ? String(Core.get(a.post.doc, 'title') || a.post.name).replace(/\.md$/i, '').trim()
@@ -1306,7 +1435,8 @@
     var message = titles.length === 1
       ? 'post: ' + titles[0]
       : 'post: 发布 ' + titles.length + ' 篇：' + titles.join('、');
-    if (queuedImgs.length) message += '（含 ' + queuedImgs.length + ' 张图片删除）';
+    var imgDel = queuedImgs.length + removeImgs.length;
+    if (imgDel) message += '（含 ' + imgDel + ' 张图片删除）';
     if (message.length > 120) message = message.slice(0, 117) + '…';
 
     setBusyText('发布：创建提交');
@@ -1350,6 +1480,12 @@
     if (queuedImgs.length) {
       imgState.queue = imgState.queue.filter(function (p) { return queuedImgs.indexOf(p) === -1; });
       saveImgQueue();
+      if (imgDom.list && document.body.contains(imgDom.list)) renderImageList();
+    }
+    if (removeImgs.length) {
+      imgState.images = imgState.images.filter(function (x) { return removeImgs.indexOf(x.path) === -1; });
+      imgState.refs = null;
+      imgState.scanKey = '';
       if (imgDom.list && document.body.contains(imgDom.list)) renderImageList();
     }
     toast(titles.length === 1
