@@ -9,6 +9,9 @@
   var REPO = root.HEXO_EDITOR_REPO || 'XieYu-Zk/ZEROKAMI-STUDIO';
   var BASE = '/api/github/repos/' + REPO;
   var POSTS_DIR = 'source/_posts/';
+  var IMAGES_DIR = 'source/images/';
+  var IMAGE_EXT = /\.(png|jpe?g|gif|webp|avif|svg|bmp|ico)$/i;
+  var TEXT_FILE_EXT = /\.(md|markdown|html?|ejs|styl|css|ya?ml|json|js|mjs|txt)$/i;
 
   function url(path) {
     return BASE + path;
@@ -164,6 +167,24 @@
     }).then(function (data) { return data.sha; });
   }
 
+  /** 建二进制 blob（内容是 base64 字符串），图片上传用 */
+  function createBlobBase64(base64) {
+    return request('/git/blobs', {
+      method: 'POST',
+      body: { content: String(base64 || '').replace(/\s/g, ''), encoding: 'base64' },
+    }).then(function (data) { return data.sha; });
+  }
+
+  /** 读 blob 的原始 base64（图片预览用，不再解码成 utf-8） */
+  function readBlobBase64(sha) {
+    return request('/git/blobs/' + sha).then(function (data) {
+      return {
+        base64: String(data.content || '').replace(/\s/g, ''),
+        encoding: data.encoding || 'base64',
+      };
+    });
+  }
+
   /** 以 baseTree 为底，覆盖/删除若干文件，返回新 tree sha */
   function createTree(baseTree, entries) {
     return request('/git/trees', {
@@ -267,9 +288,43 @@
     });
   }
 
+  /** 某个分支上的图片（source/images/**） */
+  function listImages(branch, head) {
+    var headPromise = head ? Promise.resolve(head) : headSha(branch || 'main');
+    return headPromise.then(function (sha) {
+      return getTree(sha).then(function (tree) {
+        return tree.filter(function (n) {
+          return n.type === 'blob' && n.path.indexOf(IMAGES_DIR) === 0 && IMAGE_EXT.test(n.path);
+        }).map(function (n) {
+          return { path: n.path, sha: n.sha, size: n.size };
+        });
+      });
+    });
+  }
+
+  /** 分支上所有文本文件（引用扫描用） */
+  function listTextFiles(branch, head) {
+    var headPromise = head ? Promise.resolve(head) : headSha(branch || 'main');
+    return headPromise.then(function (sha) {
+      return getTree(sha).then(function (tree) {
+        return tree.filter(function (n) {
+          if (n.type !== 'blob') return false;
+          var p = n.path;
+          if (!TEXT_FILE_EXT.test(p)) return false;
+          if (/package-lock\.json$/i.test(p)) return false;
+          if (/^(node_modules|public|tools|\.deploy_git|\.git)\//.test(p)) return false;
+          return true;
+        }).map(function (n) {
+          return { path: n.path, sha: n.sha, size: n.size };
+        });
+      });
+    });
+  }
+
   root.GitHubStore = {
     repo: REPO,
     postsDir: POSTS_DIR,
+    imagesDir: IMAGES_DIR,
     login: login,
     status: status,
     headSha: headSha,
@@ -278,6 +333,8 @@
     readBlobs: readBlobs,
     readPost: readPost,
     createBlob: createBlob,
+    createBlobBase64: createBlobBase64,
+    readBlobBase64: readBlobBase64,
     createTree: createTree,
     createCommit: createCommit,
     createRef: createRef,
@@ -291,6 +348,8 @@
     findRef: findRef,
     branchExists: branchExists,
     listPostsOn: listPostsOn,
+    listImages: listImages,
+    listTextFiles: listTextFiles,
     request: request,
     decodeBase64: decodeBase64,
     encodeBase64: encodeBase64,

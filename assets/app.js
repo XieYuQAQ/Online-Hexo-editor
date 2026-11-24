@@ -1096,6 +1096,357 @@
     });
   }
 
+  /* ---------------- 图片管理（GitHub 模式） ---------------- */
+  var IMG_QUEUE_PREFIX = 'hexo-editor:imgQueue:';
+  var imgState = {
+    images: [],       // { path, sha, size, draftBranch? }
+    refs: null,       // { basename: [引用它的文本文件] }
+    scanKey: '',
+    scanFailed: 0,
+    queue: [],        // 待删除的图片路径
+    filter: ''
+  };
+  var imgDom = { list: null, summary: null, search: null, note: null };
+
+  function imgQueueKey() {
+    return IMG_QUEUE_PREFIX + (state.githubRepo || (window.GitHubStore && GitHubStore.repo) || 'default');
+  }
+
+  function loadImgQueue() {
+    try {
+      var arr = JSON.parse(localStorage.getItem(imgQueueKey()) || '[]');
+      imgState.queue = Array.isArray(arr) ? arr : [];
+    } catch (e) { imgState.queue = []; }
+    return imgState.queue;
+  }
+
+  function saveImgQueue() {
+    try { localStorage.setItem(imgQueueKey(), JSON.stringify(imgState.queue)); } catch (e) { /* 忽略 */ }
+  }
+
+  function imgBase(path) { return String(path).split('/').pop().toLowerCase(); }
+  function imgRefsOf(img) { return (imgState.refs && imgState.refs[imgBase(img.path)]) || []; }
+  function imgQueued(path) { return imgState.queue.indexOf(path) !== -1; }
+
+  function formatSize(bytes) {
+    var n = Number(bytes) || 0;
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / 1024 / 1024).toFixed(1) + ' MB';
+  }
+
+  /** 当前分支上的图片 + 各草稿分支新增的图片 */
+  async function loadImageList() {
+    var map = Object.create(null);
+    var main = await GitHubStore.listImages('main');
+    main.forEach(function (x) { map[x.path] = x; });
+    var drafts = await GitHubStore.listDrafts();
+    for (var i = 0; i < drafts.length; i += 1) {
+      var imgs = await GitHubStore.listImages(drafts[i].branch, drafts[i].sha);
+      imgs.forEach(function (x) {
+        map[x.path] = { path: x.path, sha: x.sha, size: x.size, draftBranch: drafts[i].branch };
+      });
+    }
+    return Object.keys(map).sort().map(function (k) { return map[k]; });
+  }
+
+  /** 全仓引用扫描：main 的文本文件 + 各草稿分支改动过的文本文件 */
+  async function scanImageRefs() {
+    var mainSha = await GitHubStore.headSha('main');
+    var drafts = await GitHubStore.listDrafts();
+    var key = mainSha + '|' + drafts.map(function (d) { return d.sha; }).join(',');
+    if (imgState.refs && imgState.scanKey === key) return imgState.refs;
+
+    var files = await GitHubStore.listTextFiles('main', mainSha);
+    var extra = [];
+    for (var i = 0; i < drafts.length; i += 1) {
+      var diff = await GitHubStore.compare('main', drafts[i].sha);
+      ((diff && diff.files) || []).forEach(function (f) {
+        if (f.status === 'removed' || !f.sha) return;
+        if (!/\.(md|markdown|html?|ejs|styl|css|ya?ml|json|js|mjs|txt)$/i.test(f.filename)) return;
+        if (/package-lock\.json$/i.test(f.filename)) return;
+        extra.push({ path: f.filename, sha: f.sha });
+      });
+    }
+
+    var targets = files.concat(extra);
+    var bases = Object.create(null);
+    imgState.images.forEach(function (x) { bases[imgBase(x.path)] = true; });
+
+    var found = Object.create(null);
+    var done = 0;
+    setBusyText('正在扫描图片引用 0 / ' + targets.length);
+    var res = await GitHubStore.readBlobs(targets, function (item, text) {
+      var lower = String(text).toLowerCase();
+      var tokens = lower.split(/[^a-z0-9_.\-~@+!^]+/);
+      var hit = Object.create(null);
+      for (var t = 0; t < tokens.length; t += 1) {
+        var tok = tokens[t];
+        if (tok && bases[tok] && !hit[tok]) {
+          hit[tok] = true;
+          (found[tok] = found[tok] || []).push(item.path);
+        }
+      }
+      done += 1;
+      if (done % 10 === 0 || done === targets.length) {
+        setBusyText('正在扫描图片引用 ' + done + ' / ' + targets.length);
+      }
+    }, { concurrency: 6 });
+
+    imgState.refs = found;
+    imgState.scanFailed = (res && res.failed) || 0;
+    imgState.scanKey = key;
+    return found;
+  }
+
+  function renderImageList() {
+    var box = imgDom.list;
+    if (!box) return;
+    box.innerHTML = '';
+    var filter = imgState.filter.toLowerCase();
+    var list = imgState.images.filter(function (x) {
+      return !filter || x.path.toLowerCase().indexOf(filter) !== -1;
+    });
+    var queued = 0;
+    imgState.images.forEach(function (x) { if (imgQueued(x.path)) queued += 1; });
+
+    list.forEach(function (img) {
+      var refs = imgRefsOf(img);
+      var isQueued = imgQueued(img.path);
+      var thumb = el('div', { class: 'img-thumb', title: '点击预览' });
+      thumb.onclick = function () { previewImage(img, thumb); };
+      var name = el('div', { class: 'img-name' }, [
+        el('span', { text: imgBase(img.path) }),
+        isQueued ? el('span', { class: 'img-badge', text: '待删除' }) : null,
+        img.draftBranch ? el('span', { class: 'img-badge', text: '草稿' }) : null
+      ].filter(Boolean));
+      var meta = el('div', {
+        class: 'img-meta',
+        text: '/' + img.path.replace(/^source\//, '') + ' · ' + formatSize(img.size) +
+          ' · 引用 ' + refs.length
+      });
+      var actions = el('div', { class: 'img-actions' });
+      var rowEl;
+      if (isQueued) {
+        actions.appendChild(el('button', {
+          class: 'btn tiny', type: 'button', text: '撤销',
+          onclick: function () {
+            imgState.queue = imgState.queue.filter(function (p) { return p !== img.path; });
+            saveImgQueue();
+            renderImageList();
+          }
+        }));
+      } else {
+        actions.appendChild(el('button', {
+          class: 'btn tiny danger', type: 'button', text: '删除',
+          onclick: function () { requestDeleteImage(img, rowEl); }
+        }));
+      }
+      rowEl = el('div', { class: 'img-row' }, [
+        thumb,
+        el('div', { class: 'img-info' }, [name, meta]),
+        actions
+      ]);
+      box.appendChild(rowEl);
+    });
+
+    if (!list.length) {
+      box.appendChild(el('div', { class: 'img-empty', text: imgState.images.length ? '没有匹配的图片' : '还没有图片' }));
+    }
+    if (imgDom.summary) {
+      imgDom.summary.textContent = '共 ' + imgState.images.length + ' 张' +
+        (queued ? ' · 待删除 ' + queued + ' 张（下次发布时一并提交）' : '');
+    }
+  }
+
+  async function previewImage(img, thumb) {
+    if (img._url) { thumb.style.backgroundImage = 'url(' + img._url + ')'; return; }
+    try {
+      var data = await GitHubStore.readBlobBase64(img.sha);
+      var bin = atob(data.base64);
+      var bytes = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+      if (!window.URL || !URL.createObjectURL) return;
+      img._url = URL.createObjectURL(new Blob([bytes]));
+      thumb.style.backgroundImage = 'url(' + img._url + ')';
+    } catch (e) {
+      toast('预览失败：' + e.message, 'err');
+    }
+  }
+
+  function requestDeleteImage(img, rowEl) {
+    if (imgState.scanFailed) {
+      toast('有 ' + imgState.scanFailed + ' 个文件读取失败，为避免误删已阻止删除；请刷新后重试', 'err');
+      return;
+    }
+    var refs = imgRefsOf(img);
+    if (refs.length) {
+      // 在行内展开引用列表，不弹新窗口（弹窗会覆盖图片管理本身）
+      if (rowEl.querySelector('.img-refs')) {
+        rowEl.querySelector('.img-refs').remove();
+        return;
+      }
+      rowEl.appendChild(el('div', { class: 'img-refs' }, [
+        el('div', { class: 'img-refs-tip', text: '仍被 ' + refs.length + ' 个文件引用，先删掉引用：' })
+      ].concat(refs.slice(0, 8).map(function (p) {
+        return el('div', { class: 'img-ref-path', text: p });
+      }))));
+      toast('这张图仍被引用，已展开引用列表', 'err');
+      return;
+    }
+    if (!imgQueued(img.path)) {
+      imgState.queue.push(img.path);
+      saveImgQueue();
+      renderImageList();
+      toast('已加入待删除，下次发布时一并提交', 'ok');
+    }
+  }
+
+  function cleanupOrphanImages() {
+    if (imgState.scanFailed) {
+      toast('有 ' + imgState.scanFailed + ' 个文件读取失败，为避免误删已阻止清理；请刷新后重试', 'err');
+      return;
+    }
+    var orphans = imgState.images.filter(function (x) {
+      return !imgRefsOf(x).length && !imgQueued(x.path);
+    });
+    if (!orphans.length) { toast('没有需要清理的孤儿图'); return; }
+    var total = orphans.reduce(function (n, x) { return n + (Number(x.size) || 0); }, 0);
+    var note = imgDom.note;
+    if (!note) return;
+    note.innerHTML = '';
+    note.classList.remove('hidden');
+    note.appendChild(el('span', {
+      text: '有 ' + orphans.length + ' 张图片没有被任何文本引用，合计 ' + formatSize(total) +
+        '。加入待删除后随下次发布一起提交：'
+    }));
+    note.appendChild(el('button', {
+      class: 'btn tiny', type: 'button', text: '取消',
+      onclick: function () { note.classList.add('hidden'); }
+    }));
+    note.appendChild(el('button', {
+      class: 'btn tiny primary', type: 'button', text: '确认加入',
+      onclick: function () {
+        orphans.forEach(function (x) { if (!imgQueued(x.path)) imgState.queue.push(x.path); });
+        saveImgQueue();
+        note.classList.add('hidden');
+        renderImageList();
+        toast('已加入待删除 ' + orphans.length + ' 张', 'ok');
+      }
+    }));
+  }
+
+  function bytesToBase64(buffer) {
+    var bytes = new Uint8Array(buffer);
+    var bin = '';
+    for (var i = 0; i < bytes.length; i += 0x8000) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    }
+    return btoa(bin);
+  }
+
+  /** 上传图片到当前草稿分支，并尽量把 Markdown 插到正文 */
+  async function uploadImages(files) {
+    var p = state.current;
+    if (!p || !p.draft || p.readOnly || p.removed) {
+      toast('请先打开一篇草稿（保存过一次）再上传图片', 'err');
+      return;
+    }
+    var branch = p.draft.branch;
+    showBusy('正在上传图片…');
+    var inserted = 0;
+    try {
+      for (var i = 0; i < files.length; i += 1) {
+        var file = files[i];
+        setBusyText('正在上传 ' + (i + 1) + ' / ' + files.length + '…');
+        var b64 = bytesToBase64(await file.arrayBuffer());
+        var blobSha = await GitHubStore.createBlobBase64(b64);
+        var now = new Date();
+        var mm = String(now.getMonth() + 1).padStart(2, '0');
+        var name = randomImageName(fileExt(file.name));
+        var repoPath = GitHubStore.imagesDir + now.getFullYear() + '/' + mm + '/' + name;
+        var head = await GitHubStore.branchHead(branch);
+        var hc = await GitHubStore.getCommit(head);
+        var tree = await GitHubStore.createTree(hc.tree.sha, [
+          { path: repoPath, mode: '100644', type: 'blob', sha: blobSha }
+        ]);
+        var commit = await GitHubStore.createCommit('draft: 上传图片 ' + name, tree, [head]);
+        await GitHubStore.updateRef(branch, commit.sha, false);
+        p.draft.head = commit.sha;
+
+        if (state.current === p && !p.readOnly) {
+          var urlPath = '/' + repoPath.replace(/^source\//, '');
+          insertBlock('![](' + urlPath + ')', true);
+          inserted += 1;
+        }
+      }
+      toast('已上传 ' + files.length + ' 张图片到 ' + branch +
+        (inserted ? '，并插入正文' : ''), 'ok');
+      await refreshImageManager();
+    } catch (e) {
+      console.error('[上传图片]', e && e.request, e);
+      toast('上传失败：' + e.message, 'err');
+    } finally {
+      hideBusy();
+    }
+  }
+
+  function buildImageManager() {
+    var search = el('input', { type: 'search', placeholder: '筛选文件名…' });
+    var upload = el('button', { class: 'btn tiny', type: 'button', text: '上传图片', title: '上传到当前草稿分支' });
+    var clean = el('button', { class: 'btn tiny', type: 'button', text: '清理孤儿图' });
+    var file = el('input', { type: 'file', accept: 'image/*', multiple: 'multiple', class: 'hidden' });
+    var list = el('div', { class: 'img-list' });
+    var note = el('div', { class: 'img-note hidden' });
+    var summary = el('div', { class: 'img-foot' });
+    var box = el('div', { class: 'img-mgr' }, [
+      el('div', { class: 'img-toolbar' }, [search, upload, clean, file]),
+      note,
+      list,
+      summary
+    ]);
+    imgDom = { list: list, summary: summary, search: search, note: note };
+    search.oninput = function () { imgState.filter = search.value.trim(); renderImageList(); };
+    clean.onclick = cleanupOrphanImages;
+    upload.onclick = function () { file.click(); };
+    file.onchange = function () {
+      var picked = Array.prototype.slice.call(file.files || []);
+      file.value = '';
+      if (picked.length) uploadImages(picked);
+    };
+    return box;
+  }
+
+  async function refreshImageManager() {
+    if (!imgDom.list || !document.body.contains(imgDom.list)) return;
+    imgDom.list.innerHTML = '<div class="img-empty">正在读取图片列表…</div>';
+    showBusy('正在读取图片列表…');
+    try {
+      loadImgQueue();
+      imgState.images = await loadImageList();
+      setBusyText('正在扫描图片引用…');
+      await scanImageRefs();
+      renderImageList();
+    } catch (e) {
+      console.error('[图片管理]', e && e.request, e);
+      toast('图片列表读取失败：' + e.message, 'err');
+      imgDom.list.innerHTML = '<div class="img-empty">读取失败</div>';
+    } finally {
+      hideBusy();
+    }
+  }
+
+  async function openImageManager() {
+    if (state.mode !== 'github') { toast('图片管理只在 GitHub 模式可用', 'err'); return; }
+    if (!window.GitHubStore) { toast('GitHub 模块未加载', 'err'); return; }
+    openModal({
+      title: '图片管理',
+      body: buildImageManager(),
+      actions: [{ label: '关闭', primary: true, value: true }]
+    });
+    await refreshImageManager();
+  }
+
   /* ---------------- 草稿分支：保存 / 发布 ---------------- */
 
   /** 保存到草稿分支（第一次保存才建分支） */
@@ -1267,6 +1618,13 @@
 
     if (!applied.length) { toast('所选草稿与 main 没有差异', 'err'); return false; }
 
+    // 图片管理里的「待删除」队列，随这次发布一起提交，不单独产生部署
+    var queuedImgs = loadImgQueue().filter(function (path) { return !seen[path]; });
+    queuedImgs.forEach(function (path) {
+      seen[path] = 'queue';
+      entries.push({ path: path, mode: '100644', type: 'blob', sha: null });
+    });
+
     var titles = applied.map(function (a) {
       return a.post
         ? String(Core.get(a.post.doc, 'title') || a.post.name).replace(/\.md$/i, '').trim()
@@ -1275,6 +1633,7 @@
     var message = titles.length === 1
       ? 'post: ' + titles[0]
       : 'post: 发布 ' + titles.length + ' 篇：' + titles.join('、');
+    if (queuedImgs.length) message += '（含 ' + queuedImgs.length + ' 张图片删除）';
     if (message.length > 120) message = message.slice(0, 117) + '…';
 
     setBusyText('发布：创建提交');
@@ -1314,6 +1673,11 @@
     updateDirtyUI();
     applyReadOnly();
     renderList();
+    if (queuedImgs.length) {
+      imgState.queue = imgState.queue.filter(function (p) { return queuedImgs.indexOf(p) === -1; });
+      saveImgQueue();
+      if (imgDom.list && document.body.contains(imgDom.list)) renderImageList();
+    }
     toast(titles.length === 1
       ? '已发布，Netlify 将开始构建'
       : '已发布 ' + titles.length + ' 篇，Netlify 只构建一次', 'ok');
@@ -3451,6 +3815,8 @@
 
     renderDirDots();
     renderDraftBar();
+    var imgBtn = $('#btn-images');
+    if (imgBtn) imgBtn.classList.toggle('hidden', state.mode !== 'github');
     refreshMainView();
   }
 
@@ -3768,6 +4134,7 @@
 
     /* --- 新建 / 刷新 --- */
     $('#btn-new').onclick = newPost;
+    $('#btn-images').onclick = openImageManager;
     $('#btn-refresh').onclick = async function () {
       commitCurrentDraft();
       if (state.mode === 'github') {

@@ -268,7 +268,8 @@ async function waitFor(fn, label, timeout) {
 /* ---------------- 3. 编辑 → 保存草稿分支 → 发布 ---------------- */
 
 /** 一个够用的内存 Git：blob / tree / commit / ref，行为按 GitHub 的几个端点模拟 */
-function makeGitServer(posts) {
+function makeGitServer(posts, opts) {
+  opts = opts || {};
   const blobs = new Map(), trees = new Map(), commits = new Map(), refs = new Map();
   const blobByText = new Map();
   let seq = 0;
@@ -288,6 +289,8 @@ function makeGitServer(posts) {
 
   const seed = new Map();
   posts.forEach((p) => seed.set('source/_posts/' + p.name, setBlob(rawOf(p))));
+  (opts.files || []).forEach((f) => seed.set(f.path, setBlob(f.text)));
+  (opts.images || []).forEach((f) => seed.set(f.path, setBlob(f.text || 'fake-image-bytes')));
   const firstTree = setTree(seed);
   const firstCommit = setCommit('init', firstTree, []);
   refs.set('main', firstCommit);
@@ -700,6 +703,92 @@ function makeGitServer(posts) {
   check(!server.refs.has('draft/aaa111'), '发布后草稿分支被删除');
   await waitFor(() => d.querySelectorAll('#post-list li').length === 2, '列表剩下 2 篇');
   check(!d.querySelector('#post-list .p-badge-del'), '发布后没有待删除标签');
+
+  console.log(`[github] ${checks - failed}/${checks} 通过`);
+  if (failed) process.exitCode = 1;
+}
+
+/* ---------------- 6. 图片管理：引用检查 / 待删除队列 / 随发布生效 ---------------- */
+{
+  const IMG_USED = 'source/images/2026/10/aaaa111111.jpg';
+  const IMG_ORPHAN = 'source/images/2026/10/bbbb222222.jpg';
+  const posts = POSTS.map((p, i) => (i === 0
+    ? { ...p, body: p.body + '\n\n![](/images/2026/10/aaaa111111.jpg)' }
+    : p));
+
+  const dom = await boot();
+  const w = dom.window, d = w.document;
+  const server = makeGitServer(posts, { images: [{ path: IMG_USED }, { path: IMG_ORPHAN }] });
+  w.fetch = (url, init) => server.handle(url, init);
+
+  Array.from(d.querySelectorAll('.ws-card')).find((b) => /GitHub/.test(b.textContent)).click();
+  await waitFor(() => d.querySelectorAll('#post-list li').length === 3, '进入列表');
+  await waitFor(() => d.querySelector('#busy').classList.contains('hidden'), '列表加载完成');
+  check(!d.querySelector('#btn-images').classList.contains('hidden'), 'GitHub 模式显示图片入口');
+
+  /* 打开图片管理：两张图，引用数分别为 1 / 0 */
+  d.querySelector('#btn-images').click();
+  await waitFor(() => d.querySelector('#modal-title').textContent === '图片管理', '图片管理弹窗');
+  await waitFor(() => d.querySelectorAll('.img-row').length === 2, '列出两张图片');
+  await waitFor(() => d.querySelector('#busy').classList.contains('hidden'), '引用扫描完成');
+
+  const rowOf = (base) => Array.from(d.querySelectorAll('.img-row'))
+    .find((r) => r.querySelector('.img-name').textContent.indexOf(base) !== -1);
+  const used = rowOf('aaaa111111.jpg');
+  const orphan = rowOf('bbbb222222.jpg');
+  check(!!used && !!orphan, '两张图片都在列表里');
+  check(used.querySelector('.img-meta').textContent.indexOf('引用 1') !== -1, '被引用图片计数 1',
+    used.querySelector('.img-meta').textContent);
+  check(orphan.querySelector('.img-meta').textContent.indexOf('引用 0') !== -1, '孤儿图计数 0',
+    orphan.querySelector('.img-meta').textContent);
+
+  /* 被引用的图片不能删：行内展开引用，不弹新窗 */
+  used.querySelector('.img-actions .btn.danger').click();
+  await waitFor(() => used.querySelector('.img-refs'), '行内展开引用列表');
+  check(used.querySelector('.img-refs').textContent.indexOf('source/_posts/30 排序测试.md') !== -1,
+    '列出引用它的文章', used.querySelector('.img-refs').textContent);
+  check(!rowOf('aaaa111111.jpg').querySelector('.img-badge'), '被引用时不会进待删除');
+
+  /* 孤儿图加入待删除 */
+  orphan.querySelector('.img-actions .btn.danger').click();
+  await waitFor(() => rowOf('bbbb222222.jpg').querySelector('.img-badge'), '孤儿图标记待删除');
+  check(d.querySelector('.img-foot').textContent.indexOf('待删除 1 张') !== -1, '底部汇总待删除数量',
+    d.querySelector('.img-foot').textContent);
+
+  d.querySelector('#modal-close').click();
+  await waitFor(() => d.querySelector('#modal').classList.contains('hidden'), '关闭图片管理');
+
+  /* 建一篇草稿并发布，队列里的图片随这次发布一起删掉 */
+  d.querySelectorAll('#post-list li')[0].click();
+  await waitFor(() => d.querySelector('#f-title').value === '排序测试', '打开文章');
+  d.querySelector('#btn-edit').click();
+  const input = d.querySelector('#f-title');
+  input.value = '排序测试（图片测试）';
+  input.dispatchEvent(new w.Event('input', { bubbles: true }));
+  d.querySelector('#btn-save').click();
+  await waitFor(() => server.refs.has('draft/aaa111'), '保存草稿');
+  await waitFor(() => d.querySelector('#busy').classList.contains('hidden'), '保存完成');
+
+  d.querySelector('#btn-publish').click();
+  await waitFor(() => !d.querySelector('#modal').classList.contains('hidden'), '发布确认');
+  Array.from(d.querySelectorAll('#modal-foot .btn')).find((b) => b.textContent === '发布').click();
+  await waitFor(() => !server.refs.has('draft/aaa111'), '发布完成');
+  await waitFor(() => d.querySelector('#busy').classList.contains('hidden'), '发布遮罩消失');
+
+  const mainTree = server.treeOf(server.refs.get('main'));
+  check(!mainTree.has(IMG_ORPHAN), '孤儿图已从 main 删除');
+  check(mainTree.has(IMG_USED), '被引用的图片保留');
+  check(server.commits.get(server.refs.get('main')).message.indexOf('图片删除') !== -1,
+    '提交信息标注图片删除', server.commits.get(server.refs.get('main')).message);
+  check(JSON.parse(w.localStorage.getItem('hexo-editor:imgQueue:' + REPO) || '[]').length === 0,
+    '待删除队列已清空');
+
+  /* 重新打开：只剩一张 */
+  d.querySelector('#btn-images').click();
+  await waitFor(() => d.querySelectorAll('.img-row').length === 1, '重开只剩一张图');
+  await waitFor(() => d.querySelector('#busy').classList.contains('hidden'), '重扫完成');
+  check(d.querySelector('.img-row .img-name').textContent.indexOf('aaaa111111.jpg') !== -1,
+    '留下的是被引用那张', d.querySelector('.img-row .img-name').textContent);
 
   console.log(`[github] ${checks - failed}/${checks} 通过`);
   if (failed) process.exitCode = 1;
