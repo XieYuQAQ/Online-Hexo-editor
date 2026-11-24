@@ -1190,7 +1190,8 @@
           var abbr = String(Core.get(doc, 'abbrlink') || '').toLowerCase();
           var target = (abbr && byAbbr[abbr]) ||
             state.posts.filter(function (x) { return x.path === it.path; })[0] || null;
-          if (target === state.current && (target.dirty || target.saving)) continue;
+          // 正在编辑的这篇不动：编辑器里显示的是 memory 里的内容，替换 doc 会和可见正文对不上
+          if (target && target === state.current) continue;
           if (target) {
             target.path = it.path;
             target.name = it.name;
