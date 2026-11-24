@@ -1,6 +1,6 @@
 # Hexo 文章编辑器 · ZEROKAMI
 
-在线 Markdown 文章编辑器，直接读写 ZEROKAMI 博客仓库 `XieYu-Zk/ZEROKAMI-STUDIO` 的 `source/_posts` 与 `source/images`。
+在线 Markdown 文章编辑器，直接读写你的 Hexo 博客仓库的 `source/_posts` 与 `source/images`。
 
 - **在线地址**：<https://zerokami.cn/tools/online-hexo-editor>
 - **工作方式**：文章改动存成 Git 分支草稿，发布时合并到 `main`，Netlify 自动构建上线
@@ -162,7 +162,7 @@ npm run test:fixtures  # 用 test/fixtures/posts 的 4 篇样例
 
 - 编辑器前端：push 到 `XieYuQAQ/Online-Hexo-editor`（GitHub Pages）
 - 代理与认证：Netlify Function，源码在博客仓库的 `source/netlify/` 下（`hexo generate` 后落到 `public/netlify/`）
-- 数据仓库：`XieYu-Zk/ZEROKAMI-STUDIO`
+- 数据仓库：目标 Hexo 博客仓库（提供 `source/_posts`、`source/images`）
 
 ---
 
@@ -179,7 +179,7 @@ npm run test:fixtures  # 用 test/fixtures/posts 的 4 篇样例
 <script>window.HEXO_EDITOR_REPO = '你的用户名/你的仓库';</script>
 ```
 
-（`github.js` 默认 `XieYu-Zk/ZEROKAMI-STUDIO`，也可直接改这个默认值。）
+（`github.js` 顶部写死了一个默认仓库名，改成你的即可。）
 
 ### 2. 创建 GitHub App
 
@@ -243,7 +243,7 @@ npm run test:fixtures  # 用 test/fixtures/posts 的 4 篇样例
 | `GITHUB_APP_CLIENT_ID` | GitHub App 的 Client ID |
 | `GITHUB_APP_CLIENT_SECRET` | GitHub App 的 Client secret |
 | `GITHUB_TOKEN_SECRET` | 一段随机串（≥32 字节），用于 AES-256-GCM 加密 cookie 里的 token |
-| `GITHUB_REPO` | 目标仓库 `owner/repo`（默认 `XieYu-Zk/ZEROKAMI-STUDIO`） |
+| `GITHUB_REPO` | 目标仓库 `owner/repo`（默认值写死在 `github.js` 里，改成你的） |
 | `GITHUB_AUTH_CALLBACK` | 授权回调，默认 `https://你的域名/.netlify/functions/github-auth-callback` |
 | `GITHUB_AUTH_RETURN` | 授权完成回跳地址，默认 `/tools/online-hexo-editor/?auth=ok` |
 | `ONLINE_HEXO_EDITOR_UPSTREAM` | 编辑器静态站点地址，默认 `https://你的用户名.github.io/Online-Hexo-editor` |
