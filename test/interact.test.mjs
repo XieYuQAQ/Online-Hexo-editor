@@ -217,49 +217,6 @@ check(getBody() === '> 引用内容', '引用前缀');
 check(E.state.current.doc.body === getBody(), 'doc.body 与正文同步');
 
 /* ================================================================
- * 5. 保存（导入模式 → 下载；这里拦截 Blob 下载）
- * ================================================================ */
-let downloaded = null;
-w.URL.createObjectURL = function (blob) {
-  downloaded = blob;
-  return 'blob:mock';
-};
-const clicked = [];
-const origCreate = d.createElement.bind(d);
-d.createElement = function (tag) {
-  const node = origCreate(tag);
-  if (String(tag).toLowerCase() === 'a') {
-    node.click = function () { clicked.push({ name: node.download }); };
-  }
-  return node;
-};
-
-// jsdom 的 Blob 没有 text()，用 FileReader 读回来
-function blobText(blob) {
-  return new Promise((resolve, reject) => {
-    const fr = new w.FileReader();
-    fr.onload = () => resolve(String(fr.result));
-    fr.onerror = () => reject(fr.error);
-    fr.readAsText(blob);
-  });
-}
-
-const nameInput = d.querySelector('#file-name');
-nameInput.value = sampleAInfo.name;
-await E.savePost({ force: true });
-check(clicked.length === 1, '保存触发一次下载', JSON.stringify(clicked));
-check(clicked[0].name === sampleAInfo.name, '下载文件名正确', clicked[0].name);
-const savedText = await blobText(downloaded);
-const savedDoc = Core.parsePost(savedText);
-check(String(Core.get(savedDoc, 'title')) === newTitleA, '下载内容含新标题', Core.get(savedDoc, 'title'));
-const expectedSavedTags = tagsA.slice(1).concat('DIY', 'A', 'B');
-check(JSON.stringify(Core.get(savedDoc, 'tags')) === JSON.stringify(expectedSavedTags),
-  '下载内容含新标签', savedText.split('\n').find((l) => l.startsWith('tags:')));
-check(pA.dirty === false, '保存后脏标记清除');
-check(d.querySelector('#save-state').textContent === '已保存', '保存后状态栏');
-check(savedText.endsWith('\n') || savedText.length > 0, '内容非空');
-
-/* ================================================================
  * 7. 文件名校验 + abbrlink 锁定逻辑
  * ================================================================ */
 const newP = E.loadFromText('新文章.md', '', { isNew: true, dirty: true });
@@ -281,20 +238,6 @@ check(JSON.stringify(keys) === JSON.stringify(['title', 'abbrlink', 'description
   '新文章字段顺序', keys.join(','));
 check(/^abbrlink:\s*$/.test(Core.splitFront(text).front[1]), '新文章 abbrlink 留空', JSON.stringify(Core.splitFront(text).front[1]));
 check(/^date: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(Core.splitFront(text).front[4]), '新文章 date 有值');
-
-/* ================================================================
- * 9. 删除（导入模式，仅从列表移除）
- * ================================================================ */
-const countBefore = E.state.posts.length;
-d.querySelector('#btn-delete').click();
-await sleep(30);
-const delModal = d.querySelector('#modal');
-check(!delModal.classList.contains('hidden'), '删除弹出确认框');
-const delBtns = Array.from(delModal.querySelectorAll('#modal-foot .btn'));
-const confirm = delBtns.find((b) => b.textContent === '删除');
-confirm.click();
-await sleep(50);
-check(E.state.posts.length === countBefore - 1, '删除后列表少一篇', `${countBefore} -> ${E.state.posts.length}`);
 
 /* ================================================================
  * 10. 搜索与排序

@@ -206,29 +206,18 @@
    * 2. 状态
    * ================================================================ */
   var state = {
-    mode: 'demo',           // 'fs' | 'files' | 'demo' | 'github'
+    mode: 'github',         // 只有 GitHub 模式；未连上时保持 demo 占位
     readOnly: false,        // GitHub 模式下打开 main 上的文章时为 true
     githubRepo: '',
-    root: null,             // 项目根目录 handle
-    postsDir: null,         // source/_posts handle
-    imagesDir: null,        // source/images handle
-    imagesSource: 'auto',
-    imagesScope: null,
-    imagesVersion: 0,
     projectId: 'demo',
-    hasImages: false,
-    rootRemembered: null,   // 记得住但还没授权的文章目录 handle
-    imagesRemembered: null, // 记得住但还没授权的图片目录 handle
     sidebarCollapsed: false,// 打开文章后侧栏是否收起
     posts: [],              // { id, path, name, doc, raw, handle, dirty, savedOnce }
     selected: new Set(),    // GitHub 模式里勾选的草稿分支名
     current: null,
     filter: { q: '', tags: [], dirtyOnly: false, sort: 'date-desc' },
-    imageCache: new Map(),
     imgSize: new Map()      // path -> { w, h }：上次加载后的实际渲染尺寸，重建时用来占位，避免图片重新加载时高度塌陷
   };
 
-  var hasFSA = typeof window.showDirectoryPicker === 'function';
 
   function uid() { return Math.random().toString(36).slice(2, 10); }
 
@@ -268,12 +257,7 @@
     return id;
   }
 
-  function resetImageCache() {
-    state.imagesVersion++;
-    state.imageCache.forEach(function (url) { URL.revokeObjectURL(url); });
-    state.imageCache.clear();
-    state.imgSize.clear();
-  }
+
 
   function pathParts(path) {
     var parts = String(path || '').split('/');
@@ -283,296 +267,7 @@
     return parts;
   }
 
-  async function readPostFile(file) {
-    // File.text() 会丢掉 BOM。仅在存在 BOM 时补回它，正文仍由浏览器解码。
-    var text = await file.text();
-    if (file.slice && file.arrayBuffer) {
-      var prefix = new Uint8Array(await file.slice(0, 3).arrayBuffer());
-      if (prefix[0] === 0xef && prefix[1] === 0xbb && prefix[2] === 0xbf) text = '\uFEFF' + text;
-    }
-    return text;
-  }
 
-  function siblingPath(p, name) {
-    var path = p.path || p.name;
-    var slash = path.lastIndexOf('/');
-    return (slash < 0 ? '' : path.slice(0, slash + 1)) + name;
-  }
-
-  /* ================================================================
-   * 3. 文件系统层
-   * ================================================================ */
-  var FS = {
-    /** 选目录：优先当项目根目录，其次当 _posts */
-    async pick() {
-      var handle;
-      try {
-        handle = await window.showDirectoryPicker({ id: 'hexo-root', mode: 'readwrite' });
-      } catch (e) {
-        if (e && e.name === 'AbortError') return false;
-        throw e;
-      }
-      await idb.set('root', handle);
-      return FS.attach(handle);
-    },
-
-    /** 判断目录里有没有某个子目录 */
-    async subdir(handle, name) {
-      try {
-        return await handle.getDirectoryHandle(name);
-      } catch (e) {
-        return null;
-      }
-    },
-
-    /** 绑定一个目录 handle：自动识别是项目根 / source / _posts */
-    async attach(handle) {
-      var perm = await handle.queryPermission({ mode: 'readwrite' });
-      if (perm !== 'granted') {
-        perm = await handle.requestPermission({ mode: 'readwrite' });
-        if (perm !== 'granted') toast('没有写入权限，只能只读浏览', 'err');
-      }
-
-      var root = null, postsDir = null, imagesDir = null;
-      var lower = handle.name.toLowerCase();
-
-      // ① 项目根：<root>/source/_posts
-      var src = lower === 'source' ? handle : await FS.subdir(handle, 'source');
-      if (src) {
-        var posts = await FS.subdir(src, '_posts');
-        if (posts) {
-          postsDir = posts;
-          imagesDir = await FS.subdir(src, 'images');
-          root = lower === 'source' ? null : handle;
-        }
-      }
-
-      // ② 直接是 _posts
-      if (!postsDir && (lower === '_posts' || await FS.hasMdFiles(handle))) {
-        postsDir = handle;
-      }
-
-      // ③ 目录下就有 _posts
-      if (!postsDir) {
-        var sub = await FS.subdir(handle, '_posts');
-        if (sub) postsDir = sub;
-      }
-
-      if (!postsDir) throw new Error('这个目录里没找到 source/_posts，也没有 .md 文件');
-
-      commitCurrentDraft();
-      var projectId = await identifyProject(postsDir);
-      var keepManualImages = state.imagesSource === 'manual' &&
-        (!state.imagesScope || state.imagesScope === projectId);
-      state.mode = 'fs';
-      state.projectId = projectId;
-      state.root = root;
-      state.postsDir = postsDir;
-      if (!keepManualImages) {
-        state.imagesDir = imagesDir;
-        state.imagesSource = 'auto';
-      }
-      state.imagesScope = projectId;
-      resetImageCache();
-      state.hasImages = !!state.imagesDir;
-      state.dirName = root ? root.name : postsDir.name;
-      state.posts = [];
-      state.current = null;
-      await FS.loadAll();
-      // 目录名 / 模式提示要立刻反映到界面上（哪怕 attach 是被恢复流程调用的）
-      if (typeof updateModeUI === 'function') updateModeUI();
-      return true;
-    },
-
-    /**
-     * 单独连接 source/images。
-     * 场景：直接打开 index.html 或只选了 _posts 时，浏览器拿不到父目录，
-     * 也就找不到同级的 images —— 这时让用户手动指一次。
-     */
-    async pickImages() {
-      var handle;
-      try {
-        handle = await window.showDirectoryPicker({ id: 'hexo-images', mode: 'readwrite' });
-      } catch (e) {
-        if (e && e.name === 'AbortError') return false;
-        throw e;
-      }
-      var perm = await handle.queryPermission({ mode: 'readwrite' });
-      if (perm !== 'granted') perm = await handle.requestPermission({ mode: 'readwrite' });
-
-      // 允许选中 images 本身，或选中含 images 的 source / 项目根
-      var dir = handle;
-      if (handle.name.toLowerCase() !== 'images') {
-        var a = await FS.subdir(handle, 'images');
-        if (a) dir = a;
-        else {
-          var b = await FS.subdir(handle, 'source');
-          if (b) {
-            var c = await FS.subdir(b, 'images');
-            if (c) dir = c;
-          }
-        }
-      }
-      if (dir.name.toLowerCase() !== 'images') {
-        toast('请选择 source/images 目录（当前选的是「' + handle.name + '」）', 'err');
-        return false;
-      }
-
-      state.imagesDir = dir;
-      state.imagesSource = 'manual';
-      state.imagesScope = state.mode === 'fs' ? state.projectId : null;
-      state.hasImages = true;
-      resetImageCache();
-      await idb.set('images', dir);
-      await idb.set('imagesScope', state.imagesScope);
-      updateModeUI();
-      updateCoverPreview();
-      return true;
-    },
-
-    async hasMdFiles(dir) {
-      var seen = 0;
-      for await (var entry of dir.values()) {
-        if (entry.kind === 'file' && /\.md$/i.test(entry.name)) return true;
-        if (entry.kind === 'file' && /_config\.ya?ml$/i.test(entry.name)) return false;
-        seen += 1;
-        if (seen > 40) break;
-      }
-      return false;
-    },
-
-    async loadAll() {
-      var list = [];
-      var previous = state.posts.slice();
-      async function walk(dir, prefix) {
-        for await (var entry of dir.values()) {
-          if (entry.kind === 'directory') {
-            await walk(entry, prefix + entry.name + '/');
-            continue;
-          }
-          if (!/\.md$/i.test(entry.name)) continue;
-          if (/^_/.test(entry.name) && !prefix) continue;
-          try {
-            var file = await entry.getFile();
-            var raw = await readPostFile(file);
-            var doc = Core.parsePost(raw);
-            list.push({
-              id: uid(),
-              path: prefix + entry.name,
-              name: entry.name,
-              handle: entry,
-              doc: doc,
-              raw: raw,
-              dirty: false,
-              savedOnce: true,
-              mtime: file.lastModified,
-              projectId: state.projectId
-            });
-          } catch (e) {
-            console.warn('读取失败', entry.name, e);
-          }
-        }
-      }
-      await walk(state.postsDir, '');
-      list = list.map(function (disk) {
-        var memory = previous.find(function (p) { return p.path === disk.path && !p.isNew; });
-        if (!memory) return disk;
-        memory.handle = disk.handle;
-        if (!memory.dirty) memory.raw = disk.raw;
-        memory.mtime = disk.mtime;
-        if (!memory.dirty) memory.doc = disk.doc;
-        return memory;
-      });
-      previous.forEach(function (p) {
-        if (p.dirty && !list.some(function (x) { return x.path === p.path; })) list.push(p);
-      });
-      state.posts = list;
-      discoverDrafts();
-      FS.reindex();
-    },
-
-    /** 重新读取磁盘上的文章（刷新 abbrlink 用） */
-    async reload() {
-      if (state.mode === 'fs') {
-        var keep = state.current ? state.current.path : null;
-        await FS.loadAll();
-        if (keep) {
-          var again = state.posts.find(function (p) { return p.path === keep; });
-          if (again) openPost(again);
-          else closeEditor();
-        }
-        toast('已重新读取 ' + state.posts.length + ' 篇文章');
-        return;
-      }
-      toast('当前是导入模式，请重新选择文件夹');
-    },
-
-    async parent(dir, path) {
-      var parts = pathParts(path);
-      var name = parts.pop();
-      for (var i = 0; i < parts.length; i++) dir = await dir.getDirectoryHandle(parts[i]);
-      return { dir: dir, name: name };
-    },
-
-    async write(handleOrDir, name, text) {
-      var fh = handleOrDir;
-      if (fh.kind !== 'file') {
-        var target = await FS.parent(handleOrDir, name);
-        fh = await target.dir.getFileHandle(target.name, { create: true });
-      }
-      var w = await fh.createWritable();
-      // 直接写字符串：createWritable().write() 接受字符串，比包 Blob 更省事也更兼容
-      await w.write(text);
-      await w.close();
-      return fh;
-    },
-
-    async remove(path, baseDir) {
-      var target = await FS.parent(baseDir || state.postsDir, path);
-      await target.dir.removeEntry(target.name);
-    },
-
-    async readImage(relPath) {
-      if (!state.imagesDir) return null;
-      var parts = relPath.replace(/^\/+/, '').split('/');
-      if (parts[0] !== 'images') return null;
-      var dir = state.imagesDir;
-      try {
-        for (var i = 1; i < parts.length - 1; i++) {
-          dir = await dir.getDirectoryHandle(parts[i]);
-        }
-        var fh = await dir.getFileHandle(parts[parts.length - 1]);
-        return await fh.getFile();
-      } catch (e) {
-        return null;
-      }
-    },
-
-    /** 把图片写进 source/images/YYYY/MM/ */
-    async saveImage(file, preferDate) {
-      // 用 toString 判断，避免跨 realm（iframe/测试环境）时 instanceof 失效
-      var isDate = preferDate && Object.prototype.toString.call(preferDate) === '[object Date]';
-      var d = isDate ? preferDate : new Date();
-      var yyyy = String(d.getFullYear());
-      var mm = ('0' + (d.getMonth() + 1)).slice(-2);
-      var dir = state.imagesDir;
-      if (!dir) throw new Error('没有连接 source/images 目录');
-      dir = await dir.getDirectoryHandle(yyyy, { create: true });
-      dir = await dir.getDirectoryHandle(mm, { create: true });
-      var ext = fileExt(file.name);
-      var name = randomImageName(ext);
-      // 极低概率撞名：撞了就重抽
-      for (var i = 0; i < 20; i++) {
-        try { await dir.getFileHandle(name); } catch (e) { break; }
-        name = randomImageName(ext);
-      }
-      var fh = await dir.getFileHandle(name, { create: true });
-      var w = await fh.createWritable();
-      await w.write(file);
-      await w.close();
-      return '/images/' + yyyy + '/' + mm + '/' + name;
-    }
-  };
 
   /* ================================================================
    * 4. 列表
@@ -589,7 +284,6 @@
     renderTagFilter();
     renderList();
   }
-  FS.reindex = reindex;
 
   function renderTagFilter() {
     var box = $('#tag-filter');
@@ -840,15 +534,11 @@
       show('btn-publish', !!p && !!p.draft && (!ro || removed));
       show('btn-undo-delete', removed);
       show('btn-delete', !!p && !removed);
-      show('btn-saveas', false);
-      show('btn-dup', false);
     } else {
       show('btn-edit', false);
       show('btn-publish', false);
       show('btn-undo-delete', false);
       show('btn-save', true);
-      show('btn-saveas', true);
-      show('btn-dup', true);
       show('btn-delete', true);
     }
 
@@ -1987,89 +1677,29 @@
     });
   }
 
-  /**
-   * 把站内路径解析成能显示的 URL。
-   * 三种来源，按优先级：
-   *   1) 已连接 images 目录 → 读文件做 blob URL（最可靠，任何协议都行）
-   *   2) http(s) 环境 → 直接用 /images/... 交给服务器映射
-   *   3) file:// 且没连目录 → 用相对路径 ../../source/images/... 直接读文件系统
-   */
+  /** 站内路径 → 可显示的 URL：在线版直接用 /images/...，由站点提供 */
   function resolveImageUrl(path) {
     if (!path) return Promise.resolve('');
     path = String(path).trim();
     if (/^https?:/i.test(path)) return Promise.resolve(path);
-    if (state.imageCache.has(path)) return Promise.resolve(state.imageCache.get(path));
     if (path.charAt(0) !== '/') return Promise.resolve('');
-
-    function viaRelative() {
-      if (location.protocol !== 'file:') return null;
-      // file:// 下浏览器允许直接读同源文件；编辑器在 hexo-editor/，图片在 ../source/images/
-      return '../../source' + path;
-    }
-
-    if (!state.hasImages) {
-      var rel = viaRelative();
-      return Promise.resolve(rel || (location.protocol === 'file:' ? '' : path));
-    }
-    var version = state.imagesVersion;
-    return FS.readImage(path).then(function (file) {
-      if (!file) return viaRelative() || (location.protocol === 'file:' ? '' : path);
-      var url = URL.createObjectURL(file);
-      if (version !== state.imagesVersion) { URL.revokeObjectURL(url); return ''; }
-      state.imageCache.set(path, url);
-      return url;
-    }).catch(function () {
-      return viaRelative() || (location.protocol === 'file:' ? '' : path);
-    });
+    return Promise.resolve(path);
   }
 
   /** 把选中的图片写入 source/images 并返回站内路径 */
   async function importImage(file) {
-    if (state.mode === 'github') {
-      if (!state.current) { toast('请先打开一篇文章', 'err'); return ''; }
-      showBusy('正在上传图片…');
-      try {
-        var up = await uploadImageToDraft(file);
-        if (up) toast('图片已上传到草稿分支 ' + state.current.draft.branch, 'ok');
-        return up;
-      } catch (e) {
-        console.error('[上传图片]', e && e.request, e);
-        toast('上传失败：' + e.message, 'err');
-        return '';
-      } finally {
-        hideBusy();
-      }
-    }
-    if (!state.hasImages) {
-      var fake = '/images/' + new Date().getFullYear() + '/' + ('0' + (new Date().getMonth() + 1)).slice(-2) + '/' +
-        randomImageName(fileExt(file.name));
-      // 能连图片目录的话，直接给个一键连接的机会，别让用户干瞪眼
-      var go = hasFSA ? await openModal({
-        title: '还没连接图片目录',
-        body: '<p class="tip">图片要存进 <code>source/images/YYYY/MM/</code> 才能正常显示，' +
-          '但现在编辑器还不知道它在哪里。</p>' +
-          '<p class="tip">点「连接图片目录」会把这张图存进去并自动填好路径；' +
-          '选「只填路径」则只写 Markdown，图片需要你自己放过去。</p>',
-        actions: [
-          { label: '只填路径', value: 'path' },
-          { label: '连接图片目录', primary: true, value: 'pick' }
-        ]
-      }) : 'path';
-
-      if (go === 'pick') {
-        await pickImagesFlow();
-        if (state.hasImages) return importImage(file); // 连上了就重跑一次
-      }
-      toast('仅填了路径，请手动把图片放到 source' + fake, 'err');
-      return fake;
-    }
+    if (!state.current) { toast('请先打开一篇文章', 'err'); return ''; }
+    showBusy('正在上传图片…');
     try {
-      var path = await FS.saveImage(file);
-      toast('图片已保存到 source' + path, 'ok');
-      return path;
+      var up = await uploadImageToDraft(file);
+      if (up) toast('图片已上传到草稿分支 ' + state.current.draft.branch, 'ok');
+      return up;
     } catch (e) {
-      toast('保存图片失败：' + e.message, 'err');
+      console.error('[上传图片]', e && e.request, e);
+      toast('上传失败：' + e.message, 'err');
       return '';
+    } finally {
+      hideBusy();
     }
   }
 
@@ -2820,7 +2450,7 @@
     insertBlock('[^' + n + ']: ' + sel);
   }
 
-  /** 从本地选一张图 → 复制进 source/images → 插入 markdown */
+  /** 从本地选一张图 → 上传到当前草稿分支 → 插入 markdown */
   async function pickBodyImage() {
     var owner = state.current;
     var input = el('input', { type: 'file', accept: 'image/*', style: 'display:none' });
@@ -3110,7 +2740,6 @@
         pendingName: p.pendingName,
         isNew: !!p.isNew,
         savedOnce: !!p.savedOnce,
-        importRoot: state.mode === 'files' && p.projectId === state.projectId ? state.importRoot : undefined,
         baseRaw: p.raw
       }));
     } catch (e) { /* 忽略配额错误 */ }
@@ -3145,35 +2774,6 @@
     } catch (e) { /* 不可用的存储不能阻止读盘 */ }
   }
 
-  function legacyDrafts() {
-    try {
-      return Object.keys(localStorage).filter(function (key) {
-        return key.indexOf('hexo-editor:draft:') === 0 && key.indexOf('hexo-editor:draft:v2:') !== 0;
-      });
-    } catch (e) { return []; }
-  }
-
-  async function importLegacyDrafts() {
-    if (state.mode !== 'fs') { toast('请先连接这些草稿所属的文章目录', 'err'); return; }
-    var keys = legacyDrafts();
-    var ok = await openModal({
-      title: '导入旧版草稿',
-      body: '<p class="tip">旧版草稿没有记录所属项目。确认这 ' + keys.length + ' 份草稿属于当前目录「' +
-        escapeHtml(state.dirName) + '」后再导入。导入不会写入文章文件。</p>',
-      actions: [{ label: '取消', value: false }, { label: '导入到当前目录', primary: true, value: true }]
-    });
-    if (!ok) return;
-    keys.forEach(function (key) {
-      var target = draftPrefix() + key.slice('hexo-editor:draft:'.length);
-      if (localStorage.getItem(target) === null) {
-        localStorage.setItem(target, localStorage.getItem(key));
-        localStorage.removeItem(key);
-      }
-    });
-    discoverDrafts(); reindex();
-    toast('旧版草稿已导入，可在列表中打开恢复', 'ok');
-  }
-
   async function checkDraft(p) {
     var saved = null;
     try { saved = JSON.parse(localStorage.getItem(draftKey(p)) || 'null'); } catch (e) {}
@@ -3187,28 +2787,19 @@
         '<p class="tip">草稿内容：<br><code>' +
         escapeHtml(saved.text.slice(0, 260)) + (saved.text.length > 260 ? '…' : '') + '</code></p>',
       actions: [
-        { label: '用磁盘上的版本', value: 'discard' },
+        { label: '用远端版本', value: 'discard' },
         { label: '恢复草稿', primary: true, value: 'restore' }
       ]
     });
     if (state.current !== p) return;
     if (choice === 'restore') {
       if (saved.isNew === true) { p.isNew = true; p.savedOnce = false; }
-      if (state.mode === 'fs' && typeof saved.baseRaw === 'string') p.raw = saved.baseRaw;
       p.doc = Core.parsePost(saved.text, { isNew: p.isNew });
       p.pendingName = saved.pendingName || p.pendingName;
       var keepDirty = true;
       openPost(p, { keepDirty: keepDirty, skipDraftCheck: true, skipDraftCommit: true });
       toast('已恢复草稿，记得保存', 'ok');
     } else if (choice === 'discard') {
-      if (p.handle) {
-        try {
-          var file = await p.handle.getFile();
-          var diskText = await readPostFile(file);
-          if (state.current !== p) return;
-          p.raw = diskText;
-        } catch (e) { toast('读取磁盘版本失败，草稿已保留：' + e.message, 'err'); return; }
-      }
       clearDraft(p);
       if (p.isNew && !p.raw) {
         state.posts = state.posts.filter(function (x) { return x !== p; });
@@ -3259,49 +2850,6 @@
     return v;
   }
 
-  function linkFor(doc) {
-    return String(Core.get(doc, 'abbrlink') || Core.predictAbbrlink(Core.get(doc, 'title'))).toLowerCase();
-  }
-
-  function independentCopy(text) {
-    var doc = Core.parsePost(text, { isNew: true });
-    var base = String(Core.get(doc, 'title')).trim() + ' 副本';
-    var usedLinks = new Set(state.posts.map(function (p) { return linkFor(p.doc); }));
-    var titles = new Set(state.posts.map(function (p) { return Core.get(p.doc, 'title'); }));
-    var title = base, n = 2;
-    while (titles.has(title) || usedLinks.has(Core.predictAbbrlink(title))) title = base + ' (' + n++ + ')';
-    Core.set(doc, 'title', title);
-    Core.set(doc, 'abbrlink', Core.allocateAbbrlink(title, usedLinks));
-    return doc;
-  }
-
-  async function diskTextAt(dir, path) {
-    var target = await FS.parent(dir, path);
-    try {
-      var handle = await target.dir.getFileHandle(target.name);
-      return await readPostFile(await handle.getFile());
-    } catch (e) {
-      if (e.name === 'NotFoundError' || /^NotFoundError/.test(e.message || '')) return null;
-      throw e;
-    }
-  }
-
-  async function confirmDiskChange(source, disk, text) {
-    var body = el('div', {}, [el('p', {text: disk === null
-      ? '原文件已被移除。可以保留草稿、下载副本，或重新创建文件。'
-      : '磁盘上的文章已被其他程序修改。请核对两个版本，再决定如何保存。'})]);
-    [['当前磁盘版本', disk], ['本次保存内容', text]].forEach(function (entry) {
-      body.appendChild(el('details', {}, [el('summary', {text: entry[0]}),
-        el('pre', {class: 'conflict-text', text: entry[1] === null ? '文件不存在' : entry[1]})]));
-    });
-    var decision = await openModal({title: '文章在磁盘上已变更', body: body, enterConfirm: false, actions: [
-      {label: '保留编辑稿', primary: true, value: 'cancel'}, {label: '下载编辑稿副本', value: 'copy'},
-      {label: disk === null ? '重新创建' : '确认覆盖磁盘版本', danger: true, value: 'overwrite'}
-    ]});
-    if (decision === 'copy') downloadBlob(text, source.name.replace(/\.md$/i, '') + ' 编辑稿.md');
-    return decision === 'overwrite';
-  }
-
   async function savePost(opts) {
     opts = opts || {};
     var source = state.current;
@@ -3319,197 +2867,15 @@
       return;
     }
 
-    if (state.mode === 'github') return saveGitHubDraft(source, opts);
-
-    var requestedName = form.fileName.value;
-    var name = opts.name == null ? requestedName.trim() : String(opts.name).trim();
-    if (!name) {
-      name = source.isNew
-        ? Core.suggestFilename(String(Core.get(source.doc, 'title') || ''), Core.get(source.doc, 'date'), 'yy')
-        : source.name;
-    }
-    name = Core.sanitizeFilename(name);
-    if (!/\.md$/i.test(name)) name += '.md';
-    if (!name || name === '.md') { toast('文件名不合法', 'err'); return; }
-
-    var sourceText = Core.stringifyPost(source.doc);
-    var oldPath = source.path;
-    var oldKey = draftKey(source);
-    var targetPath = siblingPath(source, name);
-    if (opts.saveAs && targetPath === oldPath) { toast('另存为请使用不同的文件名', 'err'); return; }
-    var baseDir = state.postsDir;
-    var projectId = state.projectId;
-    var mode = state.mode;
-    var isCopy = !!opts.saveAs;
-    var deleteOld = false;
-    source.saving = true;
-    try {
-      if (mode === 'fs') {
-        var target = await FS.parent(baseDir, targetPath);
-        var existing = null;
-        try { existing = await target.dir.getFileHandle(target.name); }
-        catch (e) {
-          if (e.name !== 'NotFoundError' && !/^NotFoundError/.test(e.message || '')) throw e;
-        }
-        var sameFile = !isCopy && !source.isNew && targetPath === oldPath;
-        if (!sameFile && !isCopy && !source.isNew && existing && source.handle && existing.isSameEntry) {
-          sameFile = await existing.isSameEntry(source.handle);
-        }
-        if (existing && !sameFile) {
-          var pendingTarget = state.posts.find(function (x) { return x !== source && x.path === targetPath && x.dirty; });
-          if (pendingTarget) { toast('目标文章有未保存修改，请先保存它或使用其他文件名', 'err'); return; }
-          var overwrite = await openModal({
-            title: '文件已存在',
-            body: '<p class="tip">覆盖 <code>' + escapeHtml(targetPath) + '</code> 会替换其现有内容。</p>',
-            actions: [{ label: '取消', value: false }, { label: '覆盖文件', primary: true, danger: true, value: true }]
-          });
-          if (!overwrite) return;
-        }
-      }
-      if (mode === 'fs' && !isCopy && !source.isNew && targetPath !== oldPath && !sameFile) {
-        var choice = await openModal({
-          title: '文件名已修改',
-          body: '<p class="tip">将保存到 <code>' + escapeHtml(targetPath) + '</code>。是否删除旧文件 <code>' +
-            escapeHtml(oldPath) + '</code>？保留旧文件时，新文章会重新生成短链。</p>',
-          actions: [{ label: '取消', value: null }, { label: '保留旧文件', value: 'copy' },
-            { label: '删除旧文件', primary: true, danger: true, value: 'move' }]
-        });
-        if (!choice) return;
-        isCopy = choice === 'copy';
-        deleteOld = choice === 'move';
-      }
-      var checkedSource = source.raw;
-      if (mode === 'fs' && !source.isNew && (sameFile || deleteOld)) {
-        checkedSource = await diskTextAt(baseDir, oldPath);
-        if (checkedSource !== source.raw && checkedSource !== sourceText) {
-          if (!await confirmDiskChange(source, checkedSource, sourceText)) return false;
-          if (await diskTextAt(baseDir, oldPath) !== checkedSource) {
-            toast('文件再次变化，请重新保存并核对版本', 'err'); return false;
-          }
-        }
-      }
-      var p = source;
-      var text = sourceText;
-      if (isCopy) {
-        var copyDoc = independentCopy(sourceText);
-        text = Core.stringifyPost(copyDoc);
-        p = { id: uid(), projectId: projectId, doc: copyDoc, path: targetPath, name: name,
-          raw: '', dirty: false, isNew: true, savedOnce: false, handle: null };
-      }
-      var needsLinkCheck = p.isNew || (p.raw && linkFor(Core.parsePost(p.raw)) !== linkFor(p.doc));
-      if (needsLinkCheck && state.posts.some(function (other) {
-        return other !== p && other.path !== targetPath && linkFor(other.doc) === linkFor(p.doc);
-      })) {
-        toast('文章短链将与已有文章重复，请修改标题或设置独立短链', 'err'); return false;
-      }
-      var fh = mode === 'fs' ? await FS.write(baseDir, targetPath, text) : null;
-      if (mode !== 'fs') downloadBlob(text, name);
-      var removeError = null;
-      if (deleteOld) {
-        try {
-          var latest = await diskTextAt(baseDir, oldPath);
-          if (latest !== null && latest !== checkedSource) throw new Error('原文件刚被修改，已保留');
-          if (latest !== null) await FS.remove(oldPath, baseDir);
-        } catch (e) { removeError = e; }
-      }
-      var stillCurrent = state.current === source;
-      var changed = !isCopy && (Core.stringifyPost(source.doc) !== sourceText ||
-        (stillCurrent ? form.fileName.value !== requestedName :
-          !!source.pendingName && source.pendingName !== requestedName));
-      p.name = name;
-      p.path = targetPath;
-      p.raw = text;
-      p.handle = fh;
-      p.isNew = false;
-      p.savedOnce = true;
-      p.dirty = changed;
-      if (!changed) { p.doc = Core.parsePost(text); p.pendingName = null; }
-      if (!isCopy) {
-        try { localStorage.removeItem(oldKey); } catch (e) {}
-        if (!changed) clearDraft(p);
-        else saveDraft(p);
-      }
-      if (state.projectId === projectId) {
-        state.posts = state.posts.filter(function (x) { return x === p || x.path !== targetPath; });
-        if (state.posts.indexOf(p) === -1) state.posts.unshift(p);
-        if (removeError) await FS.loadAll();
-        if (isCopy && stillCurrent && Core.stringifyPost(source.doc) === sourceText && form.fileName.value === requestedName) {
-          source.pendingName = null;
-          form.fileName.value = source.name;
-          openPost(p, { skipDraftCheck: true });
-        } else if (!isCopy && stillCurrent) {
-          if (!changed) form.fileName.value = name;
-          applyLocks(); updateDirtyUI(); renderFrontMatter();
-        }
-        reindex();
-      }
-      if (removeError) toast('新文件已保存，但删除旧文件失败：' + removeError.message, 'err');
-      else toast((mode === 'fs' ? '已保存 ' : '已下载 ') + name + (changed ? '，后续修改仍未保存' : ''), 'ok');
-      return true;
-    } catch (e) {
-      console.error(e);
-      toast('保存失败：' + e.message, 'err');
-      return false;
-    } finally { source.saving = false; }
-  }
-
-  async function newPost() {
-    if (state.mode === 'github') return newGitHubPost();
-    commitCurrentDraft();
-    var title = await promptText('新建文章', '标题 title', '', '文章标题');
-    if (title == null) return;
-
-    var now = new Date();
-    var doc = Core.createPost({
-      title: title,
-      description: '',
-      tags: [],
-      cover: ''
-    });
-    Core.set(doc, 'date', Core.formatDateTime(now));
-    Core.set(doc, 'abbrlink', Core.allocateAbbrlink(title, usedAbbrlinks(null)));
-
-    var name = Core.suggestFilename(title, now, 'yy');
-    name = unusedName(name);
-    var p = {
-      id: uid(),
-      projectId: state.projectId,
-      path: name,
-      name: name,
-      doc: doc,
-      raw: '',
-      handle: null,
-      dirty: true,
-      savedOnce: false,
-      isNew: true
-    };
-    state.posts.unshift(p);
-    openPost(p);
-    form.fileName.select();
-    saveDraft(p);
-    toast(state.mode === 'demo' ? '正在临时写作，保存会下载 Markdown 文件' :
-      '日期已锁定（保存后解锁）；abbrlink 已按标题生成，可手动修改');
-  }
-
-  async function duplicatePost() {
-    var p = state.current;
-    if (!p) return;
-    var text = currentText();
-    var name = unusedName(p.name.replace(/\.md$/i, '') + ' 副本.md');
-    var doc = independentCopy(text);
-    var copy = {
-      id: uid(), projectId: state.projectId, path: siblingPath(p, name), name: name, doc: doc, raw: '',
-      handle: null, dirty: true, savedOnce: false, isNew: true
-    };
-    state.posts.unshift(copy);
-    openPost(copy);
-    toast('已复制为新文章，保存后才会写入磁盘');
+    return saveGitHubDraft(source, opts);
   }
 
   function unusedName(name) {
     var base = name.replace(/\.md$/i, ''), candidate = name, n = 2;
     while (state.posts.some(function (p) { return p.name === candidate; })) candidate = base + ' (' + (n++) + ').md';
     return candidate;
+  }  async function newPost() {
+    return newGitHubPost();
   }
 
   /**
@@ -3650,108 +3016,7 @@
   }
 
   async function deletePost() {
-    if (state.mode === 'github') return deleteGitHubPost();
-    var p = state.current;
-    if (!p) return;
-    if (p.saving) { toast('文章正在保存，请完成后再删除', 'err'); return; }
-    var baseDir = state.postsDir, projectId = state.projectId, mode = state.mode;
-    var ok = await openModal({
-      title: '删除文章',
-      body: '<p class="tip">确定删除 <code>' + escapeHtml(p.path) + '</code> 吗？' +
-        (state.mode === 'fs' ? '文件会从磁盘移除。' : '仅从当前列表移除。') + '</p>',
-      actions: [{ label: '取消', value: false }, { label: '删除', primary: true, danger: true, value: true }]
-    });
-    if (!ok) return;
-    try {
-      if (mode === 'fs' && !p.isNew) await FS.remove(p.path, baseDir);
-      if (projectId !== state.projectId) { clearDraft(p); return; }
-      state.posts = state.posts.filter(function (x) { return x.id !== p.id; });
-      p.dirty = false;
-      clearDraft(p);
-      if (state.current === p) closeEditor();
-      reindex();
-      toast('已删除');
-    } catch (e) {
-      toast('删除失败：' + e.message, 'err');
-    }
-  }
-
-  /* ================================================================
-   * 13. 导入模式（无 File System Access API）
-   * ================================================================ */
-  // 目录导入只提供相对路径。即使目录名和内容相同，也不能据此自动关联草稿。
-  async function chooseImportProject(posts, rootName) {
-    var groups = new Map();
-    try {
-      Object.keys(localStorage).forEach(function (key) {
-        var match = /^hexo-editor:draft:v2:(files-[^:]+):/.exec(key);
-        if (!match) return;
-        var draft;
-        try { draft = JSON.parse(localStorage.getItem(key)); } catch (e) { return; }
-        if (!draft || typeof draft.text !== 'string') return;
-        var samePath = posts.find(function (p) { return p.path === draft.path; });
-        if (draft.importRoot !== rootName && !samePath && !(draft.isNew && !draft.importRoot)) return;
-        var group = groups.get(match[1]) || { count: 0, at: 0, matches: 0, names: [] };
-        group.count++;
-        group.at = Math.max(group.at, draft.at || 0);
-        if (samePath && samePath.raw === draft.baseRaw) group.matches++;
-        group.names.push(draft.pendingName || draft.name || draft.path);
-        groups.set(match[1], group);
-      });
-    } catch (e) { /* 无本地存储时仍可导入和下载 */ }
-    if (!groups.size) return 'files-' + uid();
-    var select = el('select', {'aria-label': '历史导入记录'});
-    Array.from(groups.entries()).sort(function (a,b) {
-      return b[1].matches - a[1].matches || b[1].at - a[1].at;
-    }).forEach(function (item) {
-      var g = item[1];
-      select.appendChild(el('option', {value:item[0], text:new Date(g.at).toLocaleString() +
-        ' · ' + g.count + ' 份草稿 · ' + g.names.slice(0, 2).join('、') + ' · ' + g.matches + ' 篇原文一致'}));
-    });
-    var choice = await openModal({title:'关联导入目录的草稿', enterConfirm:false,
-      body:el('div', {}, [el('p', {text:'请选择属于当前目录「' + rootName +
-        '」的历史记录。若是其他博客，请作为新项目打开。'}), select]),
-      actions:[{label:'作为新项目打开', value:'new'}, {label:'使用所选草稿记录', primary:true, value:'use'}]});
-    if (!choice) return null;
-    return choice === 'use' ? select.value : 'files-' + uid();
-  }
-
-  function importFolder() {
-    var input = el('input', { type: 'file', multiple: true, webkitdirectory: '', directory: '', style: 'display:none' });
-    document.body.appendChild(input);
-    input.onchange = async function () {
-      var files = Array.prototype.slice.call(input.files || []);
-      input.remove();
-      if (!files.length) return;
-      var posts = [];
-      for (var i = 0; i < files.length; i++) {
-        var f = files[i];
-        if (!/\.md$/i.test(f.name)) continue;
-        var raw = await readPostFile(f);
-        var doc = Core.parsePost(raw);
-        posts.push({
-          id: uid(), path: f.webkitRelativePath || f.name, name: f.name,
-          handle: null, doc: doc, raw: raw, dirty: false, savedOnce: true
-        });
-      }
-      if (!posts.length) { toast('这个文件夹里没有 .md 文件', 'err'); return; }
-      commitCurrentDraft();
-      var rootName = posts[0].path.split('/')[0];
-      var projectId = await chooseImportProject(posts, rootName);
-      if (!projectId) return;
-      state.mode = 'files';
-      state.projectId = projectId;
-      state.importRoot = rootName;
-      state.imagesDir = null; state.hasImages = false; resetImageCache();
-      posts.forEach(function (p) { p.projectId = state.projectId; });
-      state.posts = posts;
-      discoverDrafts();
-      state.current = null;
-      reindex();
-      updateModeUI();
-      toast('已导入 ' + posts.length + ' 篇（保存会下载文件，请手动放回 _posts）', 'ok');
-    };
-    input.click();
+    return deleteGitHubPost();
   }
 
   function updateModeUI() {
@@ -3764,7 +3029,7 @@
 
   /** 主区三种状态：未连目录→欢迎页；连了但没选文章→灰掉的编辑器；选了→正常编辑 */
   function refreshMainView() {
-    var connected = state.mode === 'fs' || state.mode === 'files' || state.posts.length > 0;
+    var connected = state.posts.length > 0;
     var idle = connected && !state.current;
 
     $('#empty').classList.toggle('hidden', connected);
@@ -3852,21 +3117,6 @@
     return applyTheme();
   }
 
-  /** 连接图片目录的统一入口（按钮 / 状态栏链接都走这里） */
-  async function pickImagesFlow() {
-    if (!hasFSA) {
-      toast('这个浏览器用不了目录选择，请换 Chrome / Edge 打开', 'err');
-      return;
-    }
-    try {
-      var ok = await FS.pickImages();
-      if (ok) toast('图片目录已连接，封面与正文图片可以预览了', 'ok');
-    } catch (e) {
-      console.error(e);
-      toast('连接图片目录失败：' + e.message, 'err');
-    }
-  }
-
   /* ================================================================
    * 14. 绑定事件
    * ================================================================ */
@@ -3898,18 +3148,7 @@
     $('#btn-images').onclick = openImageManager;
     $('#btn-refresh').onclick = async function () {
       commitCurrentDraft();
-      if (state.mode === 'github') {
-        try { await refreshGitHub(); } catch (e) { toast('刷新失败：' + e.message, 'err'); }
-        return;
-      }
-      if (state.mode === 'fs') {
-        try {
-          await FS.reload();
-          updateModeUI();
-        } catch (e) { toast('刷新失败：' + e.message, 'err'); }
-      } else {
-        importFolder();
-      }
+      try { await refreshGitHub(); } catch (e) { toast('刷新失败：' + e.message, 'err'); }
     };
 
     /* --- 筛选 --- */
@@ -4081,15 +3320,6 @@
     $('#btn-edit').onclick = function () { enterDraftMode(); };
     $('#btn-publish').onclick = function () { publishGitHubDraft(); };
     $('#btn-save').onclick = function () { savePost(); };
-    $('#btn-saveas').onclick = async function () {
-      var p = state.current;
-      if (!p) return;
-      var name = await promptText('另存为', '文件名', p.name.replace(/\.md$/i, ' 副本.md'));
-      if (!name) return;
-      if (state.current !== p) return;
-      await savePost({ saveAs: true, name: name });
-    };
-    $('#btn-dup').onclick = duplicatePost;
     $('#btn-delete').onclick = deletePost;
     $('#btn-undo-delete').onclick = undoGitHubDelete;
     $('#btn-select-all').onclick = toggleSelectAll;
@@ -4119,7 +3349,7 @@
     });
 
     /* --- 文件名 --- */
-    // 只标记「待改名」，不直接改 p.name —— p.name 始终代表磁盘上真实的文件名
+    // 只标记「待改名」，不直接改 p.name —— p.name 始终代表仓库里真实的文件名
     form.fileName.onchange = function () {
       if (!state.current) return;
       var v = form.fileName.value.trim();
@@ -4229,13 +3459,11 @@
   window.HexoEditor = {
     state: state,
     form: form,
-    fs: FS,
     openPost: openPost,
     closeEditor: closeEditor,
     newPost: newPost,
     savePost: savePost,
     deletePost: deletePost,
-    duplicatePost: duplicatePost,
     setField: setField,
     addTag: addTag,
     renderChips: renderChips,
@@ -4250,8 +3478,6 @@
     prefixLines: prefixLines,
     currentText: currentText,
     draftKey: draftKey,
-    discoverDrafts: discoverDrafts,
-    importLegacyDrafts: importLegacyDrafts,
     /* 正文（contenteditable）相关的测试钩子 */
     getBody: bodyText,
     setBody: function (text) {
@@ -4272,7 +3498,6 @@
     applyTheme: applyTheme,
     setTheme: setTheme,
     themeMode: themeMode,
-    importFolder: importFolder,
     setMode: function (mode, list) {
       state.mode = mode;
       state.posts = list || [];

@@ -31,7 +31,7 @@ hexo-editor/
 │   ├── github.js           GitHub 存储层：认证入口、分支/提交/发布、图片 blob
 │   ├── app.js              编辑器主程序
 │   └── editor.css          样式
-├── test/                   9 套自动化测试，含可独立运行的文章样例
+├── test/                   7 套自动化测试，含可独立运行的文章样例
 │   ├── run.mjs             测试入口（npm test / npm run test:fixtures）
 │   └── *.test.mjs          各测试套件
 ├── package.json            仅开发测试需要，浏览器使用无需安装依赖
@@ -200,7 +200,7 @@ npm test
 npm run test:fixtures
 ```
 
-- `npm test` 运行 9 套测试：格式往返、字段编辑、选择器审计、UI、交互、所见即所得、全量补充、GitHub 模式和缺陷回归。
+- `npm test` 运行 7 套测试：格式往返、字段编辑、选择器审计、UI、交互、所见即所得和 GitHub 模式。
 - GitHub 模式那套用手写的内存 Git（blob / tree / commit / ref / compare / contents）和 mock fetch 跑，不发真实网络请求；覆盖列表元信息、编辑保存、单篇与批量发布、删除与撤销、图片引用扫描与待删除队列、新建文章全流程。
 - 默认优先只读检查相邻 Hexo 博客的 `source/_posts`；独立下载本项目时使用 `test/fixtures/posts` 中的 4 篇固定样例。
 - `npm run test:fixtures` 强制使用内置样例，不依赖本机博客目录。

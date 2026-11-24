@@ -1184,7 +1184,6 @@ body.busy-lock { overflow: hidden; }
   .ed-body { grid-template-columns: 270px 1fr; }
 }
 #btn-mobile-props { display: none; }
-.conflict-text { max-height: 12rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 860px) {
   #app, #app.collapsed {
     grid-template-columns: minmax(0, 1fr);
