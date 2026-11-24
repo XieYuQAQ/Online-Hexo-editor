@@ -537,3 +537,92 @@ function makeGitServer(posts) {
   if (failed) process.exitCode = 1;
 }
 
+/* ---------------- 4. 两篇草稿一起发布：只产生一次 main 提交 ---------------- */
+{
+  const dom = await boot();
+  const w = dom.window;
+  const d = w.document;
+  const server = makeGitServer(POSTS);
+  w.fetch = (url, init) => server.handle(url, init);
+
+  const titleOf = (li) => li.querySelector('.p-title span:last-child').textContent;
+  const clickPost = (title) => {
+    const li = Array.from(d.querySelectorAll('#post-list li')).find((x) => titleOf(x) === title);
+    if (!li) throw new Error('找不到列表项：' + title);
+    li.click();
+  };
+
+  Array.from(d.querySelectorAll('.ws-card')).find((b) => /GitHub/.test(b.textContent)).click();
+  await waitFor(() => d.querySelectorAll('#post-list li').length === 3, '进入列表');
+  await waitFor(() => d.querySelector('#busy').classList.contains('hidden'), '列表加载完成');
+
+  /* 第一篇：编辑 → 保存草稿 */
+  clickPost('排序测试');
+  await waitFor(() => d.querySelector('#f-title').value === '排序测试', '打开第一篇');
+  d.querySelector('#btn-edit').click();
+  let input = d.querySelector('#f-title');
+  input.value = '排序测试（批量）';
+  input.dispatchEvent(new w.Event('input', { bubbles: true }));
+  d.querySelector('#btn-save').click();
+  await waitFor(() => server.refs.has('draft/aaa111'), '第一篇生成草稿');
+  await waitFor(() => d.querySelector('#busy').classList.contains('hidden'), '第一篇保存完成');
+
+  /* 第二篇：编辑 → 保存草稿 */
+  clickPost('中间一篇');
+  await waitFor(() => d.querySelector('#f-title').value === '中间一篇', '打开第二篇');
+  d.querySelector('#btn-edit').click();
+  input = d.querySelector('#f-title');
+  input.value = '中间一篇（批量）';
+  input.dispatchEvent(new w.Event('input', { bubbles: true }));
+  d.querySelector('#btn-save').click();
+  await waitFor(() => server.refs.has('draft/bbb222'), '第二篇生成草稿');
+  await waitFor(() => d.querySelector('#busy').classList.contains('hidden'), '第二篇保存完成');
+
+  /* 草稿栏与勾选 */
+  const bar = d.querySelector('#draft-bar');
+  check(!bar.classList.contains('hidden'), '有草稿时出现批量发布栏');
+  check(/草稿 2 篇/.test(d.querySelector('#draft-bar-info').textContent), '草稿栏显示 2 篇',
+    d.querySelector('#draft-bar-info').textContent);
+  check(d.querySelectorAll('#post-list .p-check').length === 2, '两条草稿都有勾选框');
+  check(d.querySelector('#btn-publish-selected').disabled === true, '没选时按钮禁用');
+
+  d.querySelector('#btn-select-all').click();
+  check(d.querySelector('#btn-publish-selected').textContent === '发布选中 (2)', '全选后按钮显示数量',
+    d.querySelector('#btn-publish-selected').textContent);
+  check(d.querySelector('#btn-publish-selected').disabled === false, '全选后按钮可用');
+
+  /* 批量发布确认框 */
+  d.querySelector('#btn-publish-selected').click();
+  await waitFor(() => !d.querySelector('#modal').classList.contains('hidden'), '批量发布弹窗');
+  check(d.querySelector('#modal-title').textContent === '发布到网站', '弹窗标题', d.querySelector('#modal-title').textContent);
+  const bodyText = d.querySelector('#modal-body').textContent;
+  check(bodyText.indexOf('2 个草稿分支') !== -1, '说明合并几个分支', bodyText);
+  check(d.querySelectorAll('#modal-body .pub-list li').length === 2, '列出两篇标题',
+    String(d.querySelectorAll('#modal-body .pub-list li').length));
+
+  const go = Array.from(d.querySelectorAll('#modal-foot .btn')).find((b) => /^发布 2 篇/.test(b.textContent));
+  check(!!go, '确认按钮带数量');
+  go.click();
+  await waitFor(() => !server.refs.has('draft/aaa111') && !server.refs.has('draft/bbb222'), '两条草稿分支都被删除');
+  await waitFor(() => d.querySelector('#busy').classList.contains('hidden'), '批量发布完成');
+
+  /* main 只前进一次，两个文件都在 */
+  const mainHead = server.refs.get('main');
+  const mc = server.commits.get(mainHead);
+  check(mc.parents[0] === server.firstCommit, 'main 只前进一个提交', mc.parents.join(','));
+  check(/^post: 发布 2 篇/.test(mc.message), '提交信息包含篇数', mc.message);
+  const tree = server.treeOf(mainHead);
+  check((server.blobs.get(tree.get('source/_posts/30 排序测试.md')) || '').indexOf('排序测试（批量）') !== -1,
+    '第一篇内容进 main');
+  check((server.blobs.get(tree.get('source/_posts/28 中间一篇.md')) || '').indexOf('中间一篇（批量）') !== -1,
+    '第二篇内容进 main');
+  const publishCommits = [...server.commits.values()].filter((c) => c.parents[0] === server.firstCommit && /^post: /.test(c.message));
+  check(publishCommits.length === 1, '两篇一起发布只产生一个提交', String(publishCommits.length));
+
+  check(d.querySelectorAll('#post-list .p-badge').length === 0, '发布后没有草稿标签');
+  check(bar.classList.contains('hidden'), '发布后草稿栏消失');
+
+  console.log(`[github] ${checks - failed}/${checks} 通过`);
+  if (failed) process.exitCode = 1;
+}
+

@@ -221,6 +221,7 @@
     imagesRemembered: null, // 记得住但还没授权的图片目录 handle
     sidebarCollapsed: false,// 打开文章后侧栏是否收起
     posts: [],              // { id, path, name, doc, raw, handle, dirty, savedOnce }
+    selected: new Set(),    // GitHub 模式里勾选的草稿分支名
     current: null,
     filter: { q: '', tags: [], dirtyOnly: false, sort: 'date-desc' },
     imageCache: new Map(),
@@ -653,7 +654,20 @@
       var date = String(Core.get(p.doc, 'date') || '').slice(0, 10);
       var tags = Core.get(p.doc, 'tags') || [];
       var titleKids = [];
-      if (p.draft) titleKids.push(el('span', { class: 'p-badge', text: '草稿' }));
+      if (p.draft) {
+        var check = el('input', {
+          type: 'checkbox',
+          class: 'p-check',
+          title: '选中以批量发布',
+          onclick: function (e) {
+            e.stopPropagation();
+            toggleDraftSelect(p.draft.branch, this.checked);
+          }
+        });
+        check.checked = state.selected.has(p.draft.branch);
+        titleKids.push(check);
+        titleKids.push(el('span', { class: 'p-badge', text: '草稿' }));
+      }
       titleKids.push(el('span', { text: postTitle(p) }));
       var li = el('li', {
         class: (state.current && state.current.id === p.id ? 'active ' : '') + (p.dirty ? 'dirty' : ''),
@@ -671,6 +685,45 @@
     if (!posts.length) {
       list.appendChild(el('li', { class: 'p-empty', text: '没有匹配的文章' }));
     }
+    renderDraftBar();
+  }
+
+  /* 草稿多选：只影响批量发布，不影响打开文章 */
+  function draftPosts() {
+    return state.posts.filter(function (p) { return !!p.draft; });
+  }
+
+  function renderDraftBar() {
+    var bar = $('#draft-bar');
+    if (!bar) return;
+    var drafts = state.mode === 'github' ? draftPosts() : [];
+    bar.classList.toggle('hidden', !drafts.length);
+    // 清掉已经发布/不存在的选择
+    Array.from(state.selected).forEach(function (b) {
+      if (!drafts.some(function (p) { return p.draft.branch === b; })) state.selected.delete(b);
+    });
+    if (!drafts.length) { state.selected.clear(); return; }
+
+    var n = state.selected.size;
+    $('#draft-bar-info').textContent = '草稿 ' + drafts.length + ' 篇' + (n ? ' · 已选 ' + n : '');
+    var pub = $('#btn-publish-selected');
+    pub.disabled = n === 0;
+    pub.textContent = n ? '发布选中 (' + n + ')' : '发布选中';
+    $('#btn-select-all').textContent = n === drafts.length ? '取消全选' : '全选';
+  }
+
+  function toggleDraftSelect(branch, on) {
+    if (on) state.selected.add(branch);
+    else state.selected.delete(branch);
+    renderDraftBar();
+  }
+
+  function toggleSelectAll() {
+    var drafts = draftPosts();
+    if (!drafts.length) return;
+    if (state.selected.size === drafts.length) state.selected.clear();
+    else drafts.forEach(function (p) { state.selected.add(p.draft.branch); });
+    renderList();
   }
 
   /* ================================================================
@@ -1142,7 +1195,115 @@
     }
   }
 
-  /** 把当前草稿发布到 main：差量 tree → 一次 commit → 更新 ref → 删分支 */
+  /**
+   * 把若干草稿分支一次合并到 main：
+   * 以当前 main 的 tree 为底，只叠加这些分支改过的文件 → 一个 commit → 更新 ref → 删分支。
+   * 有任何冲突就整体拒绝，不会只发布一半。
+   */
+  async function publishDraftBranches(branches) {
+    if (!branches || !branches.length) return false;
+    setBusyText('发布：比对变更');
+    var mainSha = await GitHubStore.headSha('main');
+    var mainCommit = await GitHubStore.getCommit(mainSha);
+    var entries = [];
+    var seen = Object.create(null);
+    var applied = [];
+
+    for (var i = 0; i < branches.length; i += 1) {
+      var branch = branches[i];
+      var post = state.posts.filter(function (x) { return x.draft && x.draft.branch === branch; })[0] || null;
+      var head = await GitHubStore.branchHead(branch);
+      var diff = await GitHubStore.compare(mainSha, head);
+      var files = (diff && diff.files) || [];
+      if (!files.length) continue;                    // 没有差异的分支跳过
+
+      var base = post && post.draft ? post.draft.base : null;
+      if (base && base !== mainSha) {
+        var moved = await GitHubStore.compare(base, mainSha);
+        var touched = Object.create(null);
+        ((moved && moved.files) || []).forEach(function (f) {
+          touched[f.filename] = true;
+          if (f.previous_filename) touched[f.previous_filename] = true;
+        });
+        var clash = files.filter(function (f) {
+          return touched[f.filename] || (f.previous_filename && touched[f.previous_filename]);
+        });
+        if (clash.length) {
+          toast('「' + (post ? String(Core.get(post.doc, 'title') || post.name) : branch) +
+            '」与 main 冲突（' + clash[0].filename + '），请重新打开该草稿', 'err');
+          return false;
+        }
+      }
+
+      for (var k = 0; k < files.length; k += 1) {
+        var f = files[k];
+        var paths = [f.filename].concat(f.previous_filename ? [f.previous_filename] : []);
+        for (var t = 0; t < paths.length; t += 1) {
+          if (seen[paths[t]]) {
+            toast('两篇草稿都改了 ' + paths[t] + '，请先合并内容再批量发布', 'err');
+            return false;
+          }
+          seen[paths[t]] = branch;
+        }
+        if (f.status === 'renamed' && f.previous_filename) {
+          entries.push({ path: f.previous_filename, mode: '100644', type: 'blob', sha: null });
+        }
+        entries.push({
+          path: f.filename,
+          mode: '100644',
+          type: 'blob',
+          sha: f.status === 'removed' ? null : f.sha
+        });
+      }
+      applied.push({ branch: branch, files: files, post: post });
+    }
+
+    if (!applied.length) { toast('所选草稿与 main 没有差异', 'err'); return false; }
+
+    var titles = applied.map(function (a) {
+      return a.post
+        ? String(Core.get(a.post.doc, 'title') || a.post.name).replace(/\.md$/i, '').trim()
+        : a.branch;
+    });
+    var message = titles.length === 1
+      ? 'post: ' + titles[0]
+      : 'post: 发布 ' + titles.length + ' 篇：' + titles.join('、');
+    if (message.length > 120) message = message.slice(0, 117) + '…';
+
+    setBusyText('发布：创建提交');
+    var tree = await GitHubStore.createTree(mainCommit.tree.sha, entries);
+    var commit = await GitHubStore.createCommit(message, tree, [mainSha]);
+
+    setBusyText('发布：更新 main');
+    await GitHubStore.updateRef('main', commit.sha, false);
+
+    applied.forEach(function (a) {
+      var post = a.post;
+      if (post) {
+        var mine = a.files.filter(function (f) { return f.filename === post.path; })[0];
+        if (mine && mine.sha) post.sha = mine.sha;
+        post.draft = null;
+        post.readOnly = true;
+        post.editing = false;
+        post.dirty = false;
+        post.savedOnce = true;
+        clearDraft(post);
+        rememberMeta(post, post.doc);
+      }
+      state.selected.delete(a.branch);
+      GitHubStore.deleteRef(a.branch).catch(function () { /* 删分支失败不影响发布 */ });
+    });
+
+    updateDirtyUI();
+    applyReadOnly();
+    renderList();
+    toast(titles.length === 1
+      ? '已发布，Netlify 将开始构建'
+      : '已发布 ' + titles.length + ' 篇，Netlify 只构建一次', 'ok');
+    return true;
+  }
+
+  /** 单篇发布：确认后走统一的批量发布 */
   async function publishGitHubDraft() {
     var p = state.current;
     if (!p) return false;
@@ -1160,65 +1321,7 @@
     p.saving = true;
     showBusy('正在发布到 main…');
     try {
-      setBusyText('发布：比对变更');
-      var mainSha = await GitHubStore.headSha('main');
-      var branchSha = await GitHubStore.branchHead(branch);
-      var diff = await GitHubStore.compare(mainSha, branchSha);
-      var files = (diff && diff.files) || [];
-      if (!files.length) { toast('草稿与 main 没有差异', 'err'); return false; }
-
-      if (p.draft.base && p.draft.base !== mainSha) {
-        var moved = await GitHubStore.compare(p.draft.base, mainSha);
-        var touched = Object.create(null);
-        ((moved && moved.files) || []).forEach(function (f) {
-          touched[f.filename] = true;
-          if (f.previous_filename) touched[f.previous_filename] = true;
-        });
-        var clash = files.filter(function (f) {
-          return touched[f.filename] || (f.previous_filename && touched[f.previous_filename]);
-        });
-        if (clash.length) {
-          toast('main 已更新（' + clash[0].filename + ' 也有改动），请重新打开草稿再发布', 'err');
-          return false;
-        }
-      }
-
-      var entries = [];
-      files.forEach(function (f) {
-        if (f.status === 'renamed' && f.previous_filename) {
-          entries.push({ path: f.previous_filename, mode: '100644', type: 'blob', sha: null });
-        }
-        entries.push({
-          path: f.filename,
-          mode: '100644',
-          type: 'blob',
-          sha: f.status === 'removed' ? null : f.sha
-        });
-      });
-
-      var mainCommit = await GitHubStore.getCommit(mainSha);
-      var tree = await GitHubStore.createTree(mainCommit.tree.sha, entries);
-      var title = String(Core.get(p.doc, 'title') || p.name).trim();
-      setBusyText('发布：创建提交');
-      var commit = await GitHubStore.createCommit('post: ' + title, tree, [mainSha]);
-      setBusyText('发布：更新 main');
-      await GitHubStore.updateRef('main', commit.sha, false);
-
-      var mine = files.filter(function (f) { return f.filename === p.path; })[0];
-      if (mine && mine.sha) p.sha = mine.sha;
-      p.draft = null;
-      p.readOnly = true;
-      p.editing = false;
-      p.dirty = false;
-      p.savedOnce = true;
-      clearDraft(p);
-      rememberMeta(p, p.doc);
-      updateDirtyUI();
-      applyReadOnly();
-      renderList();
-      toast('已发布，Netlify 将开始构建', 'ok');
-      GitHubStore.deleteRef(branch).catch(function () { /* 删分支失败不影响发布 */ });
-      return true;
+      return await publishDraftBranches([branch]);
     } catch (e) {
       console.error('[发布]', e && e.request, e);
       if (e.status === 422) toast('main 已被更新，发布被拒绝，请重新打开草稿', 'err');
@@ -1226,6 +1329,54 @@
       return false;
     } finally {
       p.saving = false;
+      hideBusy();
+    }
+  }
+
+  /** 批量发布：侧栏勾选的草稿一次合并 */
+  async function publishSelectedDrafts() {
+    var branches = Array.from(state.selected);
+    if (!branches.length) return false;
+    if (branches.length > 20) { toast('一次最多发布 20 篇，请分批操作', 'err'); return false; }
+    if (state.current && state.current.dirty) {
+      toast('当前打开的文章还有未保存修改，请先保存草稿', 'err');
+      return false;
+    }
+
+    var titles = branches.map(function (b) {
+      var post = state.posts.filter(function (x) { return x.draft && x.draft.branch === b; })[0];
+      return post ? String(Core.get(post.doc, 'title') || post.name).replace(/\.md$/i, '').trim() : b;
+    });
+    var listBox = el('ul', { class: 'pub-list' }, titles.map(function (t) {
+      return el('li', { text: t });
+    }));
+    var box = el('div', {}, [
+      el('p', {
+        class: 'tip',
+        html: '会把 ' + branches.length + ' 个草稿分支合并到 <code>main</code>，然后删除这些分支。' +
+          'Netlify 只构建一次，通常 2–4 分钟。'
+      }),
+      listBox
+    ]);
+    var ok = await openModal({
+      title: '发布到网站',
+      body: box,
+      actions: [
+        { label: '取消', value: null },
+        { label: '发布 ' + branches.length + ' 篇', primary: true, value: true }
+      ]
+    });
+    if (!ok) return false;
+
+    showBusy('正在发布 ' + branches.length + ' 篇…');
+    try {
+      return await publishDraftBranches(branches);
+    } catch (e) {
+      console.error('[批量发布]', e && e.request, e);
+      if (e.status === 422) toast('main 已被更新，发布被拒绝，请刷新后重试', 'err');
+      else toast('发布失败：' + e.message, 'err');
+      return false;
+    } finally {
       hideBusy();
     }
   }
@@ -3132,6 +3283,7 @@
     }
 
     renderDirDots();
+    renderDraftBar();
     refreshMainView();
   }
 
@@ -3644,6 +3796,8 @@
     };
     $('#btn-dup').onclick = duplicatePost;
     $('#btn-delete').onclick = deletePost;
+    $('#btn-select-all').onclick = toggleSelectAll;
+    $('#btn-publish-selected').onclick = publishSelectedDrafts;
 
     /* --- 正文（contenteditable：自己接管输入行为） --- */
     form.body.addEventListener('input', onBodyInput);
