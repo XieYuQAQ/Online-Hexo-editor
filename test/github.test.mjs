@@ -710,10 +710,10 @@ function makeGitServer(posts, opts) {
 
 /* ---------------- 6. 图片管理：引用检查 / 待删除队列 / 随发布生效 ---------------- */
 {
-  const IMG_USED = 'source/images/2026/10/aaaa111111.jpg';
+  const IMG_USED = 'source/images/2026/10/TO6Gf9&ASSC@yAY1.jpg';
   const IMG_ORPHAN = 'source/images/2026/10/bbbb222222.jpg';
   const posts = POSTS.map((p, i) => (i === 0
-    ? { ...p, body: p.body + '\n\n![](/images/2026/10/aaaa111111.jpg)' }
+    ? { ...p, body: p.body + '\n\n![](/images/2026/10/TO6Gf9&ASSC@yAY1.jpg)' }
     : p));
 
   const dom = await boot();
@@ -734,7 +734,7 @@ function makeGitServer(posts, opts) {
 
   const rowOf = (base) => Array.from(d.querySelectorAll('.img-row'))
     .find((r) => r.querySelector('.img-name').textContent.indexOf(base) !== -1);
-  const used = rowOf('aaaa111111.jpg');
+  const used = rowOf('to6gf9&assc@yay1.jpg');
   const orphan = rowOf('bbbb222222.jpg');
   check(!!used && !!orphan, '两张图片都在列表里');
   check(used.querySelector('.img-meta').textContent.indexOf('引用 1') !== -1, '被引用图片计数 1',
@@ -747,7 +747,7 @@ function makeGitServer(posts, opts) {
   await waitFor(() => used.querySelector('.img-refs'), '行内展开引用列表');
   check(used.querySelector('.img-refs').textContent.indexOf('source/_posts/30 排序测试.md') !== -1,
     '列出引用它的文章', used.querySelector('.img-refs').textContent);
-  check(!rowOf('aaaa111111.jpg').querySelector('.img-badge'), '被引用时不会进待删除');
+  check(!rowOf('to6gf9&assc@yay1.jpg').querySelector('.img-badge'), '被引用时不会进待删除');
 
   /* 孤儿图加入待删除 */
   orphan.querySelector('.img-actions .btn.danger').click();
@@ -787,7 +787,7 @@ function makeGitServer(posts, opts) {
   d.querySelector('#btn-images').click();
   await waitFor(() => d.querySelectorAll('.img-row').length === 1, '重开只剩一张图');
   await waitFor(() => d.querySelector('#busy').classList.contains('hidden'), '重扫完成');
-  check(d.querySelector('.img-row .img-name').textContent.indexOf('aaaa111111.jpg') !== -1,
+  check(d.querySelector('.img-row .img-name').textContent.indexOf('to6gf9&assc@yay1.jpg') !== -1,
     '留下的是被引用那张', d.querySelector('.img-row .img-name').textContent);
 
   console.log(`[github] ${checks - failed}/${checks} 通过`);

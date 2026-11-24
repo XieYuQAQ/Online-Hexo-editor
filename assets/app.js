@@ -1170,21 +1170,20 @@
     }
 
     var targets = files.concat(extra);
-    var bases = Object.create(null);
-    imgState.images.forEach(function (x) { bases[imgBase(x.path)] = true; });
+    var bases = imgState.images.map(function (x) { return imgBase(x.path); });
 
     var found = Object.create(null);
     var done = 0;
     setBusyText('正在扫描图片引用 0 / ' + targets.length);
     var res = await GitHubStore.readBlobs(targets, function (item, text) {
-      var lower = String(text).toLowerCase();
-      var tokens = lower.split(/[^a-z0-9_.\-~@+!^]+/);
-      var hit = Object.create(null);
-      for (var t = 0; t < tokens.length; t += 1) {
-        var tok = tokens[t];
-        if (tok && bases[tok] && !hit[tok]) {
-          hit[tok] = true;
-          (found[tok] = found[tok] || []).push(item.path);
+      // 用子串匹配而不是分词：文件名里可能有 & @ ! ~ 等字符，
+      // 分词会把 `TO6Gf9&ASSC@yAY1.jpg` 切成两半，导致引用数永远为 0。
+      var lower = String(text).toLowerCase().replace(/&amp;/g, '&');
+      for (var b = 0; b < bases.length; b += 1) {
+        var base = bases[b];
+        if (base && lower.indexOf(base) !== -1) {
+          var bucket = found[base] || (found[base] = []);
+          if (bucket.indexOf(item.path) === -1) bucket.push(item.path);
         }
       }
       done += 1;
