@@ -767,6 +767,8 @@
     refs: null,       // { basename: [引用它的文本文件] }
     scanKey: '',
     scanFailed: 0,
+    mainFiles: null,  // 每文件引用快照（main）：{ path: { sha, bases } }
+    draftFiles: null, // 每文件引用快照（草稿改动）：{ path: { sha, bases } }
     queue: [],        // 待删除的图片路径
     filter: ''
   };
@@ -835,6 +837,8 @@
       imgState.refs = cached.refs;
       imgState.scanFailed = cached.failed || 0;
       imgState.scanKey = sig.key;
+      imgState.mainFiles = cached.main || null;
+      imgState.draftFiles = cached.draft || null;
       return cached.refs;
     }
     if (!imgState.images.length) imgState.images = await loadImageList();
@@ -891,6 +895,8 @@
     imgState.refs = refs;
     imgState.scanFailed = failed;
     imgState.scanKey = sig.key;
+    imgState.mainFiles = mainOut;
+    imgState.draftFiles = draftOut;
     cached = cached || {};
     cached.sig = sig.key;
     cached.refs = refs;
@@ -952,74 +958,60 @@
   }
 
   async function orphanedImagesAfterPublishInner(applied) {
-    if (!imgState.images.length) {
-      imgState.images = await loadImageList();
-    }
-    var bases = imgState.images.map(function (x) { return imgBase(x.path); });
+    repoSig = null;               // 确保下面拿到的引用快照是「刚保存草稿」之后的最新状态
+    await scanImageRefs();        // 走缓存/增量，快；顺带填好 imgState.mainFiles / draftFiles
+    if (!imgState.images.length) imgState.images = await loadImageList();
+
     var byBase = Object.create(null);
     imgState.images.forEach(function (x) { byBase[imgBase(x.path)] = x.path; });
 
-    var changed = [];   // { path, oldBases, newBases, text }
+    var mainFiles = imgState.mainFiles || {};
+    var draftFiles = imgState.draftFiles || {};
+    var changedByPath = Object.create(null);
+    var changedList = [];
+
     for (var i = 0; i < applied.length; i += 1) {
       var files = applied[i].files || [];
       for (var k = 0; k < files.length; k += 1) {
         var f = files[k];
         if (!/\.md$/i.test(f.filename)) continue;
-        var newText = '';
-        if (f.status !== 'removed') {
-          try { newText = await GitHubStore.readBlob(f.sha); } catch (e) { continue; }
-        }
         var oldBases = Object.create(null);
-        if (f.status === 'modified' || f.status === 'removed' || f.status === 'renamed') {
-          try {
-            var oldPath = f.status === 'renamed' ? f.previous_filename : f.filename;
-            oldBases = extractImageBases((await GitHubStore.readPost(oldPath, 'main')).text);
-          } catch (e) { /* 新增文件或读不到旧版 */ }
+        var newBases = (draftFiles[f.filename] && draftFiles[f.filename].bases) || Object.create(null);
+        if (f.status === 'removed') {
+          oldBases = (mainFiles[f.filename] && mainFiles[f.filename].bases) || Object.create(null);
+          newBases = Object.create(null);
+        } else {
+          var oldPath = f.status === 'renamed' ? f.previous_filename : f.filename;
+          oldBases = (mainFiles[oldPath] && mainFiles[oldPath].bases) || Object.create(null);
+          if (f.status === 'renamed' && f.previous_filename) {
+            changedByPath[f.previous_filename] = { oldBases: oldBases, newBases: Object.create(null) };
+          }
         }
-        changed.push({ path: f.filename, oldBases: oldBases, newBases: extractImageBases(newText), text: newText });
+        changedByPath[f.filename] = { oldBases: oldBases, newBases: newBases };
+        changedList.push({ path: f.filename, oldBases: oldBases, newBases: newBases });
       }
     }
-    if (!changed.length) return [];
+    if (!changedList.length) return [];
 
-    var overrides = Object.create(null);
-    changed.forEach(function (c) { overrides[c.path] = c.text; });
-
-    // 重建「发布后」的引用：被改动的文本用新内容，其余用 main 旧内容；再叠加未发布的草稿改动
-    var mainSha = await GitHubStore.headSha('main');
-    var mainFiles = await GitHubStore.listTextFiles('main', mainSha);
-    var drafts = await GitHubStore.listDrafts();
-    var items = [];
-    mainFiles.forEach(function (tf) {
-      if (overrides[tf.path] !== undefined) items.push({ path: tf.path, text: overrides[tf.path] });
-      else items.push({ path: tf.path, sha: tf.sha });
-    });
-    // 被删除/改名的旧路径也要从 main 文本里排除，否则旧引用会残留
-    changed.forEach(function (c) {
-      if (c.path !== (c.oldPath)) { /* noop */ }
-    });
-    for (var d = 0; d < drafts.length; d += 1) {
-      var diff = await GitHubStore.compare('main', drafts[d].sha);
-      ((diff && diff.files) || []).forEach(function (f2) {
-        if (f2.status === 'removed' || !f2.sha) return;
-        if (!/\.md$/i.test(f2.filename) || overrides[f2.filename] !== undefined) return;
-        items.push({ path: f2.filename, sha: f2.sha });
-      });
-    }
-
+    // 重建「发布后」的引用（纯内存，不读 blob）：
+    // main 文件里被发布的用新内容，其余用旧内容；再叠加未发布草稿的改动。
     var found = Object.create(null);
-    function absorb(path, text) {
-      var b = extractImageBases(text);
-      for (var t = 0; t < bases.length; t += 1) {
-        if (b[bases[t]]) (found[bases[t]] = found[bases[t]] || []).push(path);
-      }
+    function absorb(path, bases) {
+      Object.keys(bases).forEach(function (b) { (found[b] = found[b] || []).push(path); });
     }
-    var toRead = items.filter(function (x) { return x.sha; });
-    setBusyText('正在核对图片引用…');
-    await GitHubStore.readBlobs(toRead, function (item, text) { absorb(item.path, text); }, { concurrency: 6 });
-    items.forEach(function (x) { if (x.text !== undefined) absorb(x.path, x.text); });
+    Object.keys(mainFiles).forEach(function (path) {
+      absorb(path, changedByPath[path] ? changedByPath[path].newBases : mainFiles[path].bases);
+    });
+    changedList.forEach(function (c) {
+      if (!(c.path in mainFiles)) absorb(c.path, c.newBases);   // 新增文件
+    });
+    Object.keys(draftFiles).forEach(function (path) {
+      if (changedByPath[path]) return;                          // 已发布，按 new 计过了
+      absorb(path, draftFiles[path].bases);                     // 未发布草稿的改动
+    });
 
     var orphan = [];
-    changed.forEach(function (c) {
+    changedList.forEach(function (c) {
       Object.keys(c.oldBases).forEach(function (b) {
         if (c.newBases[b]) return;
         if (byBase[b] && !(found[b] && found[b].length)) orphan.push(byBase[b]);
