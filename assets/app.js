@@ -214,8 +214,7 @@
     posts: [],              // { id, path, name, doc, raw, handle, dirty, savedOnce }
     selected: new Set(),    // GitHub 模式里勾选的草稿分支名
     current: null,
-    draftImageBranch: null, // 已建索引的草稿分支名
-    draftImages: null,      // 草稿分支图片索引 { path: sha }
+    imageIndex: null,       // 全局图片索引 { key, main: {path:sha}, drafts: {path:sha} }
     filter: { q: '', tags: [], dirtyOnly: false, sort: 'date-desc' },
     imgSize: new Map()      // path -> { w, h }：上次加载后的实际渲染尺寸，重建时用来占位，避免图片重新加载时高度塌陷
   };
@@ -875,8 +874,17 @@
 
   /** 本次发布会删掉哪些图片的最后一个引用（→ 变成孤儿） */
   async function orphanedImagesAfterPublish(applied) {
+    try {
+      return await orphanedImagesAfterPublishInner(applied);
+    } catch (e) {
+      console.error('[孤儿图检查失败]', e && e.request, e);
+      return [];   // 检查失败不能阻塞发布，宁可先不删
+    }
+  }
+
+  async function orphanedImagesAfterPublishInner(applied) {
     if (!imgState.images.length) {
-      try { imgState.images = await loadImageList(); } catch (e) { return []; }
+      imgState.images = await loadImageList();
     }
     var bases = imgState.images.map(function (x) { return imgBase(x.path); });
     var byBase = Object.create(null);
@@ -887,12 +895,17 @@
       var files = applied[i].files || [];
       for (var k = 0; k < files.length; k += 1) {
         var f = files[k];
-        if (!/\.md$/i.test(f.filename) || f.status === 'removed') continue;
-        var newText;
-        try { newText = await GitHubStore.readBlob(f.sha); } catch (e) { continue; }
+        if (!/\.md$/i.test(f.filename)) continue;
+        var newText = '';
+        if (f.status !== 'removed') {
+          try { newText = await GitHubStore.readBlob(f.sha); } catch (e) { continue; }
+        }
         var oldBases = Object.create(null);
-        if (f.status === 'modified') {
-          try { oldBases = extractImageBases((await GitHubStore.readPost(f.filename, 'main')).text); } catch (e) { /* 忽略 */ }
+        if (f.status === 'modified' || f.status === 'removed' || f.status === 'renamed') {
+          try {
+            var oldPath = f.status === 'renamed' ? f.previous_filename : f.filename;
+            oldBases = extractImageBases((await GitHubStore.readPost(oldPath, 'main')).text);
+          } catch (e) { /* 新增文件或读不到旧版 */ }
         }
         changed.push({ path: f.filename, oldBases: oldBases, newBases: extractImageBases(newText), text: newText });
       }
@@ -910,6 +923,10 @@
     mainFiles.forEach(function (tf) {
       if (overrides[tf.path] !== undefined) items.push({ path: tf.path, text: overrides[tf.path] });
       else items.push({ path: tf.path, sha: tf.sha });
+    });
+    // 被删除/改名的旧路径也要从 main 文本里排除，否则旧引用会残留
+    changed.forEach(function (c) {
+      if (c.path !== (c.oldPath)) { /* noop */ }
     });
     for (var d = 0; d < drafts.length; d += 1) {
       var diff = await GitHubStore.compare('main', drafts[d].sha);
@@ -939,7 +956,9 @@
         if (byBase[b] && !(found[b] && found[b].length)) orphan.push(byBase[b]);
       });
     });
-    return orphan.filter(function (p, idx) { return orphan.indexOf(p) === idx; });
+    var result = orphan.filter(function (p, idx) { return orphan.indexOf(p) === idx; });
+    console.log('[孤儿图检查]', result);
+    return result;
   }
 
   /** 发布前弹窗：勾选要一并删除的图片，返回选中路径数组 / 空数组（不删）/ null（取消发布） */
@@ -1140,7 +1159,7 @@
     var commit = await GitHubStore.createCommit('draft: 上传图片 ' + name, tree, [head]);
     await GitHubStore.updateRef(p.draft.branch, commit.sha, false);
     p.draft.head = commit.sha;
-    if (state.draftImages) state.draftImages[repoPath] = blobSha;
+    if (state.imageIndex) state.imageIndex.drafts[repoPath] = blobSha;
     return '/' + repoPath.replace(/^source\//, '');
   }
 
@@ -1831,27 +1850,39 @@
   // 草稿分支图片预览：path → { sha, url } 缓存
   var imgPreviewCache = Object.create(null);
 
-  /** 当前打开文章所属草稿分支上的图片索引（path → blob sha），惰性构建 */
-  async function ensureDraftImageIndex() {
-    var p = state.current;
-    var branch = p && p.draft ? p.draft.branch : null;
-    if (!branch) return null;
-    if (state.draftImageBranch === branch) return state.draftImages;
-    try {
-      var imgs = await GitHubStore.listImages(branch, p.draft.head || undefined);
-      var map = Object.create(null);
-      imgs.forEach(function (x) { map[x.path] = x.sha; });
-      state.draftImageBranch = branch;
-      state.draftImages = map;
-    } catch (e) { /* 忽略，退回站点路径 */ }
-    return state.draftImages;
+  /**
+   * 全局图片索引：main 上已有的 + 所有草稿分支里的。
+   * 用来判断某张图是「已发布（走站点路径）」还是「只在草稿分支（走 blob）」，跟当前打开哪篇无关。
+   */
+  async function ensureImageIndex() {
+    var mainSha = await GitHubStore.headSha('main');
+    var drafts = await GitHubStore.listDrafts();
+    var key = mainSha + '|' + drafts.map(function (d) { return d.sha; }).join(',');
+    if (state.imageIndex && state.imageIndex.key === key) return state.imageIndex;
+
+    var main = await GitHubStore.listImages('main', mainSha);
+    var mainSet = Object.create(null);
+    main.forEach(function (x) { mainSet[x.path] = x.sha; });
+
+    var draftMap = Object.create(null);
+    for (var i = 0; i < drafts.length; i += 1) {
+      var imgs = await GitHubStore.listImages(drafts[i].branch, drafts[i].sha);
+      imgs.forEach(function (x) {
+        if (!(x.path in draftMap)) draftMap[x.path] = x.sha;
+      });
+    }
+    state.imageIndex = { key: key, main: mainSet, drafts: draftMap };
+    return state.imageIndex;
   }
 
   function previewDraftImage(path) {
-    return ensureDraftImageIndex().then(function (map) {
-      if (!map) return '';
-      var sha = map[path.replace(/^\/images\//, 'source/images/')];
-      if (!sha) return '';
+    var repoPath = path.replace(/^\/images\//, 'source/images/');
+    return ensureImageIndex().then(function (idx) {
+      var sha = idx.drafts[repoPath];
+      if (!sha) {
+        // 不在任何草稿分支：main 上有就用站点路径，否则说明图还不存在
+        return idx.main[repoPath] ? '' : '';
+      }
       var hit = imgPreviewCache[path];
       if (hit && hit.sha === sha) return hit.url;
       return GitHubStore.readBlobBase64(sha).then(function (data) {
@@ -1863,7 +1894,7 @@
         imgPreviewCache[path] = { sha: sha, url: url };
         return url;
       }).catch(function () { return ''; });
-    });
+    }).catch(function () { return ''; });
   }
 
   /** 把选中的图片写入 source/images 并返回站内路径 */
