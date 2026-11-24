@@ -46,6 +46,36 @@
     toastTimer = setTimeout(function () { t.className = 'toast'; }, kind === 'err' ? 4200 : 2400);
   }
 
+  /* 阻塞式加载提示：铺满全屏 + 遮罩，等待期间不接受任何点击 */
+  var busyDepth = 0;
+  function showBusy(text) {
+    busyDepth += 1;
+    var box = $('#busy');
+    if (!box) return;
+    $('#busy-text').textContent = text || '处理中…';
+    box.classList.remove('hidden');
+    document.body.classList.add('busy-lock');
+  }
+
+  function setBusyText(text) {
+    var box = $('#busy');
+    if (!box || box.classList.contains('hidden')) return;
+    $('#busy-text').textContent = text;
+  }
+
+  function hideBusy() {
+    busyDepth = Math.max(0, busyDepth - 1);
+    if (busyDepth > 0) return;
+    var box = $('#busy');
+    if (box) box.classList.add('hidden');
+    document.body.classList.remove('busy-lock');
+  }
+
+  function isBusy() {
+    var box = $('#busy');
+    return !!box && !box.classList.contains('hidden');
+  }
+
   function debounce(fn, wait) {
     var h = null;
     var run = function () {
@@ -853,9 +883,11 @@
 
   /** 后台补齐没有缓存的文章：并发读 blob，边读边刷新列表 */
   async function fillGitHubMeta(items) {
-    if (!items.length) return;
-    toast('正在读取 ' + items.length + ' 篇文章信息…');
+    if (!items.length) return { done: 0, failed: 0 };
+    var total = items.length;
+    var done = 0;
     var last = 0;
+    setBusyText('正在读取文章信息…');
     var res = await GitHubStore.readBlobs(items, function (item, text) {
       var p = item.post;
       if (p.loaded) { rememberMeta(p, p.doc); return; }
@@ -865,17 +897,21 @@
       p.loaded = true;
       p.readOnly = true;
       rememberMeta(p, doc);
+      done += 1;
+      if (done === total || done % 3 === 0) {
+        setBusyText('正在读取文章信息 ' + done + ' / ' + total);
+      }
       var now = Date.now();
       if (now - last > 200) { last = now; renderList(); }
     }, { concurrency: 6 });
     if (ghCache) { pruneGhCache(ghCache, state.posts); saveGhCacheSoon(ghCache); }
     reindex();
-    if (res.failed) toast('有 ' + res.failed + ' 篇读取失败，已跳过', 'err');
-    else toast('已读取 ' + res.done + ' 篇文章信息', 'ok');
+    return res;
   }
 
-  /** 载入 GitHub 上的文章列表：先用缓存渲染，再补齐缺失的元信息 */
+  /** 载入 GitHub 上的文章列表：先渲染，再补齐元信息与草稿分支 */
   async function loadGitHubPosts() {
+    setBusyText('正在读取文章列表…');
     var list = await GitHubStore.listPosts('main');
     var cache = await loadGhCache();
     var missing = [];
@@ -905,26 +941,26 @@
     state.current = null;
     reindex();
     refreshMainView();
-    fillGitHubMeta(missing)
-      .catch(function (e) { toast('读取文章信息失败：' + e.message, 'err'); })
-      .then(function () { return mergeDraftBranches(); })
-      .catch(function () { /* 草稿合并失败不影响主列表 */ });
+    var res = await fillGitHubMeta(missing);
+    if (res.failed) toast('有 ' + res.failed + ' 篇读取失败，已跳过', 'err');
+    setBusyText('正在合并草稿分支…');
+    await mergeDraftBranches();
     return { total: state.posts.length, cached: state.posts.length - missing.length };
   }
 
   async function enterGitHub() {
     if (!window.GitHubStore) { toast('GitHub 模块未加载', 'err'); return; }
-    toast('正在连接 GitHub…');
-    var st = await GitHubStore.status();
-    if (!st.ok) {
-      if (st.error === 401) { GitHubStore.login(); return; }
-      toast('连接失败：' + (st.message || ('HTTP ' + st.error)), 'err');
-      return;
-    }
-    state.mode = 'github';
-    state.githubRepo = st.repo;
-    ghCache = null;
+    showBusy('正在连接 GitHub…');
     try {
+      var st = await GitHubStore.status();
+      if (!st.ok) {
+        if (st.error === 401) { GitHubStore.login(); return; }
+        toast('连接失败：' + (st.message || ('HTTP ' + st.error)), 'err');
+        return;
+      }
+      state.mode = 'github';
+      state.githubRepo = st.repo;
+      ghCache = null;
       var info = await loadGitHubPosts();
       updateModeUI();
       toast('已连接 ' + st.repo + '，共 ' + info.total + ' 篇' +
@@ -933,6 +969,8 @@
       state.mode = 'demo';
       updateModeUI();
       toast('读取列表失败：' + e.message, 'err');
+    } finally {
+      hideBusy();
     }
   }
 
@@ -940,12 +978,16 @@
   async function refreshGitHub() {
     if (state.mode !== 'github') return false;
     if (state.current) closeEditor();
-    toast('正在重新读取 GitHub 列表…');
-    var info = await loadGitHubPosts();
-    updateModeUI();
-    toast('已刷新，共 ' + info.total + ' 篇' +
-      (info.cached ? '（' + info.cached + ' 篇来自缓存）' : ''), 'ok');
-    return true;
+    showBusy('正在重新读取列表…');
+    try {
+      var info = await loadGitHubPosts();
+      updateModeUI();
+      toast('已刷新，共 ' + info.total + ' 篇' +
+        (info.cached ? '（' + info.cached + ' 篇来自缓存）' : ''), 'ok');
+      return true;
+    } finally {
+      hideBusy();
+    }
   }
 
   /** 从 GitHub 切回已经连过的本地目录（必要时补一次授权） */
@@ -1017,9 +1059,11 @@
     var text = Core.stringifyPost(source.doc);
 
     source.saving = true;
+    showBusy('正在保存到草稿…');
     var step = '读取分支';
     try {
       step = '写入文件内容';
+      setBusyText('保存到草稿：' + step);
       var blobSha = await GitHubStore.createBlob(text);
       var entries = [{ path: path, mode: '100644', type: 'blob', sha: blobSha }];
       if (oldPath && oldPath !== path) {
@@ -1027,12 +1071,14 @@
       }
 
       step = '检查草稿分支';
+      setBusyText('保存到草稿：' + step);
       var head = await GitHubStore.findRef(branch);
 
       var base = source.draft && source.draft.base ? source.draft.base : null;
       var commitSha;
       if (head) {
         step = '更新草稿提交';
+        setBusyText('保存到草稿：' + step);
         var headCommit = await GitHubStore.getCommit(head);
         if (!base) base = (headCommit.parents && headCommit.parents[0] && headCommit.parents[0].sha) || null;
         var tree = await GitHubStore.createTree(headCommit.tree.sha, entries);
@@ -1041,6 +1087,7 @@
         commitSha = commit.sha;
       } else {
         step = '创建草稿分支';
+        setBusyText('保存到草稿：' + step);
         var mainSha = await GitHubStore.headSha('main');
         base = mainSha;
         var mainCommit = await GitHubStore.getCommit(mainSha);
@@ -1091,6 +1138,7 @@
       return false;
     } finally {
       source.saving = false;
+      hideBusy();
     }
   }
 
@@ -1110,7 +1158,9 @@
     if (!ok) return false;
 
     p.saving = true;
+    showBusy('正在发布到 main…');
     try {
+      setBusyText('发布：比对变更');
       var mainSha = await GitHubStore.headSha('main');
       var branchSha = await GitHubStore.branchHead(branch);
       var diff = await GitHubStore.compare(mainSha, branchSha);
@@ -1149,7 +1199,9 @@
       var mainCommit = await GitHubStore.getCommit(mainSha);
       var tree = await GitHubStore.createTree(mainCommit.tree.sha, entries);
       var title = String(Core.get(p.doc, 'title') || p.name).trim();
+      setBusyText('发布：创建提交');
       var commit = await GitHubStore.createCommit('post: ' + title, tree, [mainSha]);
+      setBusyText('发布：更新 main');
       await GitHubStore.updateRef('main', commit.sha, false);
 
       var mine = files.filter(function (f) { return f.filename === p.path; })[0];
@@ -1174,6 +1226,7 @@
       return false;
     } finally {
       p.saving = false;
+      hideBusy();
     }
   }
 

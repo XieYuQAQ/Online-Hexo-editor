@@ -193,9 +193,14 @@ body {
   font-size: 10px;
   line-height: 16px;
   vertical-align: 1px;
-  color: var(--accent);
-  background: rgba(110, 168, 254, .14);
-  border: 1px solid rgba(110, 168, 254, .3);
+  color: var(--warn);
+  background: rgba(232, 178, 58, .16);
+  border: 1px solid rgba(232, 178, 58, .5);
+}
+html[data-theme="light"] .post-list .p-badge {
+  color: #8a5a00;
+  background: #fdf3d6;
+  border-color: #e2b34a;
 }
 .post-list .p-meta .p-tags { color: var(--accent); opacity: .8; }
 .post-list li.dirty .p-title::after {
@@ -1052,6 +1057,42 @@ img.ed-img.bad { display: none; }
   pointer-events: none;
 }
 .drop-hint.on { display: flex; }
+
+/* ---------------- 阻塞式加载 ---------------- */
+.busy {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--overlay);
+  backdrop-filter: blur(2px);
+}
+.busy-box {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 190px;
+  padding: 14px 18px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  box-shadow: var(--shadow-lg);
+  font-size: 13px;
+  color: var(--fg);
+}
+.busy-spin {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  border: 2px solid var(--line-2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: busy-rotate .8s linear infinite;
+}
+@keyframes busy-rotate { to { transform: rotate(360deg); } }
+body.busy-lock { overflow: hidden; }
 
 /* ---------------- 窄屏 ---------------- */
 @media (max-width: 1100px) {

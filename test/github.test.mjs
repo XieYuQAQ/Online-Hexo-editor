@@ -142,12 +142,16 @@ async function waitFor(fn, label, timeout) {
     d.querySelector('#modal-title').textContent);
   const card2 = Array.from(d.querySelectorAll('.ws-card')).find((b) => /GitHub/.test(b.textContent));
   card2.click();
+  check(!d.querySelector('#busy').classList.contains('hidden'), '进入 GitHub 时弹出阻塞遮罩');
+  check(d.querySelector('#busy-text').textContent.length > 0, '遮罩里带提示文案',
+    d.querySelector('#busy-text').textContent);
 
   await waitFor(() => d.querySelectorAll('#post-list li').length === 3, '列表渲染出 3 篇');
   await waitFor(() => {
     const t = d.querySelector('#post-list li .p-title');
     return t && t.textContent !== '30 排序测试';
   }, '标题被 front matter 覆盖');
+  await waitFor(() => d.querySelector('#busy').classList.contains('hidden'), '加载完成后遮罩消失');
 
   const items = Array.from(d.querySelectorAll('#post-list li'));
   const titles = items.map((li) => li.querySelector('.p-title').textContent);
@@ -439,7 +443,11 @@ function makeGitServer(posts) {
   titleInput.value = '排序测试（改）';
   titleInput.dispatchEvent(new w.Event('input', { bubbles: true }));
   d.querySelector('#btn-save').click();
+  check(!d.querySelector('#busy').classList.contains('hidden'), '保存时弹出阻塞遮罩');
+  check(d.querySelector('#busy-text').textContent.indexOf('保存') !== -1, '遮罩提示是保存中',
+    d.querySelector('#busy-text').textContent);
   await waitFor(() => server.refs.has('draft/aaa111'), '保存后创建草稿分支');
+  await waitFor(() => d.querySelector('#busy').classList.contains('hidden'), '保存完成后遮罩消失');
 
   const head1 = server.refs.get('draft/aaa111');
   const c1 = server.commits.get(head1);
@@ -491,8 +499,19 @@ function makeGitServer(posts) {
     d.querySelector('#modal-title').textContent);
   const pubBtn = Array.from(d.querySelectorAll('#modal-foot .btn')).find((b) => b.textContent === '发布');
   check(!!pubBtn, '弹窗里有「发布」按钮');
+  const busyEl = d.querySelector('#busy');
+  let sawPublishBusy = false;
+  const obs = new w.MutationObserver(() => {
+    if (!busyEl.classList.contains('hidden') && /发布/.test(d.querySelector('#busy-text').textContent)) {
+      sawPublishBusy = true;
+    }
+  });
+  obs.observe(busyEl, { attributes: true, attributeFilter: ['class'], subtree: true, childList: true, characterData: true });
   pubBtn.click();
   await waitFor(() => !server.refs.has('draft/aaa111') && server.refs.get('main') !== server.firstCommit, '发布完成');
+  obs.disconnect();
+  check(sawPublishBusy, '发布时弹出阻塞遮罩');
+  await waitFor(() => busyEl.classList.contains('hidden'), '发布完成后遮罩消失');
 
   const mainHead = server.refs.get('main');
   const mc = server.commits.get(mainHead);
