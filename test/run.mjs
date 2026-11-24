@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const suites = ['roundtrip', 'edit', 'selectors', 'ui', 'interact', 'fs-e2e', 'wysiwyg', 'full', 'regression'];
+const suites = ['roundtrip', 'edit', 'selectors', 'ui', 'interact', 'fs-e2e', 'wysiwyg', 'full', 'github', 'regression'];
 const env = { ...process.env };
 if (process.argv.includes('--fixtures')) env.HEXO_EDITOR_POSTS_DIR = path.join(here, 'fixtures/posts');
 let failures = 0;

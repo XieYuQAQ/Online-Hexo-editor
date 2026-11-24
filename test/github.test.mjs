@@ -1,0 +1,215 @@
+// GitHub 模式：列表的标题 / 日期 / 标签来自 front matter，而不是文件名。
+// 全部用 mock fetch 跑，不发真实网络请求。
+// 用法：node test/github.test.mjs
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+import { waitForBoot } from './helpers.mjs';
+
+const require = createRequire(import.meta.url);
+const { JSDOM } = require('jsdom');
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const editorDir = path.resolve(here, '..');
+
+let checks = 0;
+let failed = 0;
+function check(ok, label, extra) {
+  checks += 1;
+  if (!ok) {
+    failed += 1;
+    console.log(`✗ ${label}` + (extra ? `\n    ${extra}` : ''));
+  }
+}
+
+const REPO = 'XieYu-Zk/ZEROKAMI-STUDIO';
+const API = '/api/github/repos/' + REPO;
+
+/* 三篇虚构文章：日期跨度足够验证排序，标签有交集也有独有 */
+const POSTS = [
+  { name: '30 排序测试.md', sha: 'sha30', title: '排序测试', date: '2026-11-20 10:00:00',
+    tags: ['测试', '格式'], abbrlink: 'aaa111', body: '正文三十' },
+  { name: '28 中间一篇.md', sha: 'sha28', title: '中间一篇', date: '2026-10-01 09:30:00',
+    tags: ['测试'], abbrlink: 'bbb222', body: '正文二十八' },
+  { name: '12 最早一篇.md', sha: 'sha12', title: '最早一篇', date: '2025-01-05 08:00:00',
+    tags: ['生活'], abbrlink: 'ccc333', body: '正文十二' }
+];
+
+function rawOf(p) {
+  return [
+    '---',
+    'title: ' + p.title,
+    'date: ' + p.date,
+    'tags: [' + p.tags.join(', ') + ']',
+    'abbrlink: ' + p.abbrlink,
+    '---',
+    '',
+    p.body,
+    ''
+  ].join('\n');
+}
+
+function jsonRes(data, status) {
+  status = status || 200;
+  return Promise.resolve({
+    ok: status < 400,
+    status: status,
+    headers: { get: () => 'application/json' },
+    json: () => Promise.resolve(data),
+    text: () => Promise.resolve(JSON.stringify(data))
+  });
+}
+
+async function boot() {
+  const html = fs.readFileSync(path.join(editorDir, 'index.html'), 'utf8')
+    .replace(/<script src="assets\/[^"]+"><\/script>/g, '');
+  const dom = new JSDOM(html, {
+    url: 'http://localhost/',
+    runScripts: 'outside-only',
+    pretendToBeVisual: true
+  });
+  const w = dom.window;
+  w.indexedDB = undefined;                 // 不落缓存，每次都是冷启动
+  if (!w.TextDecoder) w.TextDecoder = TextDecoder;
+  if (!w.TextEncoder) w.TextEncoder = TextEncoder;
+  w.HEXO_EDITOR_REPO = REPO;
+  for (const file of ['core.js', 'github.js', 'app.js']) {
+    w.eval(fs.readFileSync(path.join(editorDir, 'assets', file), 'utf8'));
+  }
+  await waitForBoot(dom);
+  return dom;
+}
+
+async function waitFor(fn, label, timeout) {
+  const deadline = Date.now() + (timeout || 4000);
+  while (!fn()) {
+    if (Date.now() > deadline) throw new Error('timeout: ' + label);
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
+/* ---------------- 1. 列表元信息来自 front matter ---------------- */
+{
+  const dom = await boot();
+  const w = dom.window;
+  const d = w.document;
+
+  const calls = [];
+  w.fetch = (url) => {
+    const u = String(url);
+    calls.push(u);
+    if (u === API) {
+      return jsonRes({ full_name: REPO, default_branch: 'main', private: true, permissions: { push: true } });
+    }
+    if (u === API + '/git/ref/heads/main') return jsonRes({ object: { sha: 'headsha' } });
+    if (u === API + '/git/trees/headsha?recursive=1') {
+      return jsonRes({
+        tree: POSTS.map((p) => ({
+          path: 'source/_posts/' + p.name, mode: '100644', type: 'blob', sha: p.sha, size: 200
+        }))
+      });
+    }
+    const blob = u.match(/\/git\/blobs\/([^/?]+)$/);
+    if (blob) {
+      const post = POSTS.find((p) => p.sha === blob[1]);
+      if (!post) return jsonRes({ message: 'unknown sha' }, 404);
+      return jsonRes({ sha: post.sha, encoding: 'base64', content: Buffer.from(rawOf(post), 'utf8').toString('base64') });
+    }
+    const contents = u.match(/\/contents\/(.+)\?ref=main$/);
+    if (contents) {
+      const name = decodeURI(contents[1]).replace('source/_posts/', '');
+      const post = POSTS.find((p) => p.name === name);
+      if (!post) return jsonRes({ message: 'not found' }, 404);
+      return jsonRes({ sha: post.sha, encoding: 'base64', content: Buffer.from(rawOf(post), 'utf8').toString('base64') });
+    }
+    return jsonRes({ message: 'not mocked: ' + u }, 404);
+  };
+
+  const ghCard = Array.from(d.querySelectorAll('.ws-card')).find((b) => /GitHub/.test(b.textContent));
+  check(!!ghCard, '启动选择器里有「GitHub 仓库」', d.querySelector('#modal-body')?.textContent);
+  ghCard.click();
+
+  await waitFor(() => d.querySelectorAll('#post-list li').length === 3, '列表渲染出 3 篇');
+  await waitFor(() => {
+    const t = d.querySelector('#post-list li .p-title');
+    return t && t.textContent !== '30 排序测试';
+  }, '标题被 front matter 覆盖');
+
+  const items = Array.from(d.querySelectorAll('#post-list li'));
+  const titles = items.map((li) => li.querySelector('.p-title').textContent);
+  check(titles.join('|') === '排序测试|中间一篇|最早一篇', '按 date 倒序，标题取 front matter', titles.join('|'));
+
+  const meta0 = items[0].querySelector('.p-meta').textContent;
+  check(meta0.indexOf('2026-11-20') !== -1, '第一项显示日期', meta0);
+  check(meta0.indexOf('测试 / 格式') !== -1, '第一项显示 tags（/ 分隔）', meta0);
+
+  check(d.querySelector('#post-list li .p-title').textContent !== '30 排序测试.md', '不再显示文件名');
+
+  const tagBtns = Array.from(d.querySelectorAll('#tag-filter .tagbtn')).map((b) => b.textContent);
+  check(tagBtns.indexOf('测试 2') !== -1, '标签筛选按 front matter 统计：测试 2', tagBtns.join(' | '));
+  check(tagBtns.indexOf('格式 1') !== -1, '标签筛选：格式 1', tagBtns.join(' | '));
+  check(tagBtns.indexOf('生活 1') !== -1, '标签筛选：生活 1', tagBtns.join(' | '));
+
+  check(d.querySelector('#count-info').textContent === '3 / 3 篇', '计数为 3 / 3', d.querySelector('#count-info').textContent);
+
+  const blobCalls = calls.filter((u) => /\/git\/blobs\//.test(u)).length;
+  check(blobCalls === 3, '每篇只读一次 blob', String(blobCalls));
+  check(!calls.some((u) => /\/contents\//.test(u)), '列表阶段不拉正文（contents API）');
+
+  /* 搜索也能命中 front matter 标题 */
+  const search = d.querySelector('#search');
+  search.value = '中间';
+  search.dispatchEvent(new w.Event('input', { bubbles: true }));
+  await waitFor(() => d.querySelectorAll('#post-list li').length === 1, '搜索命中 1 篇');
+  check(d.querySelector('#post-list li .p-title').textContent === '中间一篇', '搜索按标题过滤');
+  search.value = '';
+  search.dispatchEvent(new w.Event('input', { bubbles: true }));
+  await waitFor(() => d.querySelectorAll('#post-list li').length === 3, '清空搜索恢复 3 篇');
+
+  /* 打开文章：正文已有，不需要再请求 */
+  const before = calls.length;
+  items[0].click();
+  await waitFor(() => d.querySelector('#body').textContent.indexOf('正文三十') !== -1, '正文渲染');
+  check(calls.length === before, '打开已预载的文章不再发请求', String(calls.length - before));
+  check(d.querySelector('#f-title').value === '排序测试', '属性区回填 title', d.querySelector('#f-title').value);
+  check(d.querySelector('#f-date').value === '2026-11-20 10:00:00', '属性区回填 date', d.querySelector('#f-date').value);
+  check(d.querySelectorAll('#tags-chips .chip').length === 2, '属性区回填 2 个标签');
+  check(!d.querySelector('#readonly-hint').classList.contains('hidden'), 'main 上的文章仍是只读');
+  check(d.querySelector('#btn-save').classList.contains('hidden'), '只读态隐藏保存按钮');
+
+  console.log(`[github] ${checks - failed}/${checks} 通过`);
+  if (failed) process.exitCode = 1;
+}
+
+/* ---------------- 2. readBlobs：并发上限与失败计数 ---------------- */
+{
+  const dom = await boot();
+  const w = dom.window;
+  let inflight = 0;
+  let maxInflight = 0;
+  const items = Array.from({ length: 9 }, (_, i) => ({ sha: 's' + i }));
+  w.fetch = (url) => {
+    inflight += 1;
+    maxInflight = Math.max(maxInflight, inflight);
+    const ok = !/s7$/.test(String(url));
+    return new Promise((resolve) => {
+      setTimeout(() => {
+        inflight -= 1;
+        if (!ok) return resolve({ ok: false, status: 500, headers: { get: () => 'application/json' }, json: () => Promise.resolve({ message: 'boom' }) });
+        resolve({
+          ok: true,
+          status: 200,
+          headers: { get: () => 'application/json' },
+          json: () => Promise.resolve({ encoding: 'base64', content: Buffer.from('x', 'utf8').toString('base64') })
+        });
+      }, 8);
+    });
+  };
+  const res = await w.GitHubStore.readBlobs(items, () => {}, { concurrency: 3 });
+  check(maxInflight <= 3, '并发不超过 concurrency', String(maxInflight));
+  check(maxInflight === 3, '并发确实跑到 3', String(maxInflight));
+  check(res.done === 8 && res.failed === 1, '单个失败不中断其余', JSON.stringify(res));
+  console.log(`[github] ${checks - failed}/${checks} 通过`);
+  if (failed) process.exitCode = 1;
+}

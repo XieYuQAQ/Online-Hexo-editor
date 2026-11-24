@@ -717,6 +717,7 @@
       p.sha = data.sha;
       p.loaded = true;
       p.readOnly = true;
+      rememberMeta(p, p.doc);
       openPost(p, { skipDraftCheck: true });
       reindex();
     }).catch(function (e) {
@@ -744,11 +745,97 @@
     if (hint) hint.classList.toggle('hidden', !ro);
   }
 
-  /** 载入 GitHub 上的文章列表（只读，标题先取文件名） */
+  /* ---- GitHub 列表元信息（标题/日期/标签）缓存 ---- */
+  var GH_META_FIELDS = ['title', 'date', 'tags', 'abbrlink', 'description', 'cover'];
+  var ghCache = null;       // { entries: { path: { sha, meta } } }
+  var ghCacheTimer = 0;
+
+  function ghCacheId() {
+    return 'ghPosts:' + (state.githubRepo || (window.GitHubStore && GitHubStore.repo) || 'default');
+  }
+
+  /** 从已解析的 doc 里抽列表要用的字段 */
+  function metaOf(doc) {
+    var meta = {};
+    GH_META_FIELDS.forEach(function (k) {
+      var v = Core.get(doc, k);
+      meta[k] = Array.isArray(v) ? v.slice() : (v == null ? '' : v);
+    });
+    return meta;
+  }
+
+  /** 只有 front matter 的轻量 doc：列表先用它渲染，正文等打开时再拉 */
+  function docFromMeta(meta) {
+    var doc = Core.parsePost('');
+    GH_META_FIELDS.forEach(function (k) {
+      Core.set(doc, k, k === 'tags' ? (meta.tags || []) : String(meta[k] == null ? '' : meta[k]));
+    });
+    doc.body = '';
+    return doc;
+  }
+
+  async function loadGhCache() {
+    if (ghCache) return ghCache;
+    var saved = await idb.get(ghCacheId());
+    ghCache = (saved && saved.entries && typeof saved.entries === 'object') ? saved : { entries: {} };
+    return ghCache;
+  }
+
+  function saveGhCacheSoon(cache) {
+    clearTimeout(ghCacheTimer);
+    ghCacheTimer = setTimeout(function () {
+      idb.set(ghCacheId(), { entries: cache.entries, at: Date.now() });
+    }, 600);
+  }
+
+  /** 丢掉已不在列表里的缓存项（文章改名/删除） */
+  function pruneGhCache(cache, posts) {
+    var alive = Object.create(null);
+    posts.forEach(function (p) { alive[p.path] = true; });
+    Object.keys(cache.entries).forEach(function (key) {
+      if (!alive[key]) delete cache.entries[key];
+    });
+  }
+
+  function rememberMeta(p, doc) {
+    p.meta = metaOf(doc);
+    if (ghCache) {
+      ghCache.entries[p.path] = { sha: p.sha, meta: p.meta };
+      saveGhCacheSoon(ghCache);
+    }
+  }
+
+  /** 后台补齐没有缓存的文章：并发读 blob，边读边刷新列表 */
+  async function fillGitHubMeta(items) {
+    if (!items.length) return;
+    toast('正在读取 ' + items.length + ' 篇文章信息…');
+    var last = 0;
+    var res = await GitHubStore.readBlobs(items, function (item, text) {
+      var p = item.post;
+      if (p.loaded) { rememberMeta(p, p.doc); return; }
+      var doc = Core.parsePost(text);
+      p.raw = text;
+      p.doc = doc;
+      p.loaded = true;
+      p.readOnly = true;
+      rememberMeta(p, doc);
+      var now = Date.now();
+      if (now - last > 200) { last = now; renderList(); }
+    }, { concurrency: 6 });
+    if (ghCache) { pruneGhCache(ghCache, state.posts); saveGhCacheSoon(ghCache); }
+    reindex();
+    if (res.failed) toast('有 ' + res.failed + ' 篇读取失败，已跳过', 'err');
+    else toast('已读取 ' + res.done + ' 篇文章信息', 'ok');
+  }
+
+  /** 载入 GitHub 上的文章列表：先用缓存渲染，再补齐缺失的元信息 */
   async function loadGitHubPosts() {
     var list = await GitHubStore.listPosts('main');
+    var cache = await loadGhCache();
+    var missing = [];
     state.posts = list.map(function (it) {
-      return {
+      var hit = cache.entries[it.path];
+      var p = {
         id: uid(),
         path: it.path,
         name: it.name,
@@ -761,11 +848,21 @@
         readOnly: true,
         loaded: false
       };
+      if (hit && hit.sha === it.sha && hit.meta) {
+        p.doc = docFromMeta(hit.meta);
+        p.meta = hit.meta;
+      } else {
+        missing.push({ sha: it.sha, post: p });
+      }
+      return p;
     });
     state.current = null;
     reindex();
-    renderList();
     refreshMainView();
+    fillGitHubMeta(missing).catch(function (e) {
+      toast('读取文章信息失败：' + e.message, 'err');
+    });
+    return { total: state.posts.length, cached: state.posts.length - missing.length };
   }
 
   async function enterGitHub() {
@@ -779,10 +876,12 @@
     }
     state.mode = 'github';
     state.githubRepo = st.repo;
+    ghCache = null;
     try {
-      await loadGitHubPosts();
+      var info = await loadGitHubPosts();
       updateModeUI();
-      toast('已连接 ' + st.repo + '，共 ' + state.posts.length + ' 篇', 'ok');
+      toast('已连接 ' + st.repo + '，共 ' + info.total + ' 篇' +
+        (info.cached ? '（' + info.cached + ' 篇来自缓存）' : ''), 'ok');
     } catch (e) {
       state.mode = 'demo';
       updateModeUI();

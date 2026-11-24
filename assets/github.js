@@ -102,6 +102,46 @@
     });
   }
 
+  /** 按 blob sha 读文本（列表批量取 front matter 用，比 contents 少一次重定向） */
+  function readBlob(sha) {
+    return request('/git/blobs/' + sha).then(function (data) {
+      if (data.encoding && data.encoding !== 'base64') return String(data.content || '');
+      return decodeBase64(data.content);
+    });
+  }
+
+  /**
+   * 并发读取多个 blob。
+   * @param {Array<{sha:string}>} items
+   * @param {(item:any, text:string)=>void} onEach 每成功读完一个就回调（失败不回调）
+   * @param {{concurrency?:number}} [opts]
+   * @returns {Promise<{done:number, failed:number}>}
+   */
+  function readBlobs(items, onEach, opts) {
+    opts = opts || {};
+    var limit = Math.max(1, opts.concurrency || 6);
+    var cursor = 0;
+    var done = 0;
+    var failed = 0;
+    function next() {
+      if (cursor >= items.length) return Promise.resolve();
+      var item = items[cursor];
+      cursor += 1;
+      return readBlob(item.sha).then(function (text) {
+        done += 1;
+        try { onEach(item, text); } catch (e) { /* 单个回调出错不影响其余 */ }
+      }).catch(function () {
+        failed += 1;
+      }).then(next);
+    }
+    var workers = [];
+    var n = Math.min(limit, items.length);
+    for (var i = 0; i < n; i += 1) workers.push(next());
+    return Promise.all(workers).then(function () {
+      return { done: done, failed: failed };
+    });
+  }
+
   /** 读单篇文章 */
   function readPost(path, branch) {
     return request('/contents/' + encodeURI(path) + '?ref=' + (branch || 'main')).then(function (data) {
@@ -120,6 +160,8 @@
     status: status,
     headSha: headSha,
     listPosts: listPosts,
+    readBlob: readBlob,
+    readBlobs: readBlobs,
     readPost: readPost,
     request: request,
     decodeBase64: decodeBase64,
