@@ -794,3 +794,66 @@ function makeGitServer(posts, opts) {
   if (failed) process.exitCode = 1;
 }
 
+/* ---------------- 7. 新建 → 保存草稿 → 发布 → 删除走待删除 ---------------- */
+{
+  const dom = await boot();
+  const w = dom.window, d = w.document;
+  const server = makeGitServer(POSTS);
+  w.fetch = (url, init) => server.handle(url, init);
+
+  Array.from(d.querySelectorAll('.ws-card')).find((b) => /GitHub/.test(b.textContent)).click();
+  await waitFor(() => d.querySelectorAll('#post-list li').length === 3, '进入列表');
+  await waitFor(() => d.querySelector('#busy').classList.contains('hidden'), '列表加载完成');
+
+  /* 新建 */
+  d.querySelector('#btn-new').click();
+  await waitFor(() => d.querySelector('#modal-title').textContent === '新建文章', '新建弹窗');
+  d.querySelector('#modal-body input').value = '新建测试';
+  Array.from(d.querySelectorAll('#modal-foot .btn')).find((b) => b.textContent === '确定').click();
+  await waitFor(() => d.querySelector('#f-title').value === '新建测试', '进入新文章编辑');
+
+  const abbr = w.HexoCore.predictAbbrlink('新建测试');
+  check(d.querySelector('#f-abbrlink').value === abbr, '新建时已生成 abbrlink', d.querySelector('#f-abbrlink').value);
+
+  /* 保存 → 建草稿分支 */
+  d.querySelector('#btn-save').click();
+  await waitFor(() => server.refs.has('draft/' + abbr), '新建文章保存成草稿');
+  await waitFor(() => d.querySelector('#busy').classList.contains('hidden'), '保存完成');
+
+  const draftHead = server.refs.get('draft/' + abbr);
+  const draftTree = server.treeOf(draftHead);
+  const draftPath = [...draftTree.keys()].find((p) => /新建测试\.md$/.test(p));
+  check(!!draftPath, '草稿分支里有新文件', [...draftTree.keys()].join(','));
+  check(draftTree.size === POSTS.length + 1, '草稿分支比 main 多一个文件', String(draftTree.size));
+
+  /* 发布 → 进 main */
+  d.querySelector('#btn-publish').click();
+  await waitFor(() => !d.querySelector('#modal').classList.contains('hidden'), '发布确认');
+  Array.from(d.querySelectorAll('#modal-foot .btn')).find((b) => b.textContent === '发布').click();
+  await waitFor(() => !server.refs.has('draft/' + abbr), '发布完成');
+  await waitFor(() => d.querySelector('#busy').classList.contains('hidden'), '发布遮罩消失');
+
+  const mainTree = server.treeOf(server.refs.get('main'));
+  check(mainTree.has(draftPath), '新文章进入 main');
+  check((server.blobs.get(mainTree.get(draftPath)) || '').indexOf('title: 新建测试') !== -1,
+    'main 上的标题正确');
+
+  await waitFor(() => Array.from(d.querySelectorAll('#post-list li'))
+    .some((li) => li.textContent.indexOf('新建测试') !== -1), '列表出现新文章');
+  check(!d.querySelector('#post-list .p-badge'), '发布后新文章没有草稿标签');
+
+  /* 再删除：已发布过，必须走「删除文章」而不是「删除草稿」 */
+  const newLi = Array.from(d.querySelectorAll('#post-list li'))
+    .find((li) => li.textContent.indexOf('新建测试') !== -1);
+  newLi.click();
+  await waitFor(() => d.querySelector('#f-title').value === '新建测试', '打开新文章');
+  d.querySelector('#btn-delete').click();
+  await waitFor(() => !d.querySelector('#modal').classList.contains('hidden'), '删除弹窗');
+  check(d.querySelector('#modal-title').textContent === '删除文章',
+    '发布过的文章走「删除文章」', d.querySelector('#modal-title').textContent);
+  Array.from(d.querySelectorAll('#modal-foot .btn')).find((b) => b.textContent === '取消').click();
+
+  console.log(`[github] ${checks - failed}/${checks} 通过`);
+  if (failed) process.exitCode = 1;
+}
+

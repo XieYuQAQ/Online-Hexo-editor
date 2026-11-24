@@ -1662,6 +1662,7 @@
         post.editing = false;
         post.dirty = false;
         post.savedOnce = true;
+        post.mainExists = true;      // 发布后它已经在 main 上了，删除要走「待删除」流程
         clearDraft(post);
         rememberMeta(post, post.doc);
       }
