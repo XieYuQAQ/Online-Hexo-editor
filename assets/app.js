@@ -1050,45 +1050,18 @@
     }
   }
 
-  /** 从 GitHub 切回已经连过的本地目录（必要时补一次授权） */
-  async function resumeLocal() {
-    var h = state.root || state.postsDir;
-    if (!h) { maybeOpenDirGuide(); return false; }
-    try {
-      if (h.queryPermission) {
-        var perm = await h.queryPermission({ mode: 'readwrite' });
-        if (perm !== 'granted' && h.requestPermission) {
-          perm = await h.requestPermission({ mode: 'readwrite' });
-        }
-        if (perm !== 'granted') {
-          toast('目录需要重新授权，请重新选择一次', 'err');
-          maybeOpenDirGuide();
-          return false;
-        }
-      }
-      if (state.current) closeEditor();
-      await FS.attach(h);
-      toast('已切回本地目录：' + (state.dirName || ''), 'ok');
-      return true;
-    } catch (e) {
-      toast('切回本地目录失败：' + e.message, 'err');
-      maybeOpenDirGuide();
-      return false;
-    }
-  }
-
-  /** 点左下角 GitHub 状态：仓库信息 / 重新读取 / 换回本地目录 */
+  /** 点左下角 GitHub 状态：仓库信息 / 重新读取 */
   function openGitHubInfo() {
     var body = el('div', { class: 'guide' }, [
       el('p', { class: 'tip', text: '已连接 ' + (state.githubRepo || '') + ' · main，共 ' + state.posts.length + ' 篇文章。' }),
-      el('p', { class: 'tip', text: 'main 上的文章是只读的，改动需要先转成草稿分支（下一步接入）。' })
+      el('p', { class: 'tip', text: 'main 上的文章是只读的，点「编辑」后保存会写入草稿分支。' })
     ]);
     openModal({
       title: 'GitHub 仓库',
       body: body,
       enterConfirm: false,
       actions: [
-        { label: '切换为本地目录', onClick: function () { setTimeout(openWorkspaceChooser, 0); } },
+        { label: '关闭', value: null },
         { label: '重新读取', primary: true, onClick: function () {
           refreshGitHub().catch(function (e) { toast('刷新失败：' + e.message, 'err'); });
         } }
@@ -1345,41 +1318,49 @@
   }
 
   /** 上传图片到当前草稿分支，并尽量把 Markdown 插到正文 */
+  /** 把一张图片写进当前草稿分支，返回站内路径（失败返回空串） */
+  async function uploadImageToDraft(file) {
+    var p = state.current;
+    if (!p || !p.draft || p.readOnly || p.removed) {
+      toast('图片只能存进草稿：请先点「编辑」并保存一次草稿', 'err');
+      return '';
+    }
+    var b64 = bytesToBase64(await file.arrayBuffer());
+    var blobSha = await GitHubStore.createBlobBase64(b64);
+    var now = new Date();
+    var mm = String(now.getMonth() + 1).padStart(2, '0');
+    var name = randomImageName(fileExt(file.name));
+    var repoPath = GitHubStore.imagesDir + now.getFullYear() + '/' + mm + '/' + name;
+    var head = await GitHubStore.branchHead(p.draft.branch);
+    var hc = await GitHubStore.getCommit(head);
+    var tree = await GitHubStore.createTree(hc.tree.sha, [
+      { path: repoPath, mode: '100644', type: 'blob', sha: blobSha }
+    ]);
+    var commit = await GitHubStore.createCommit('draft: 上传图片 ' + name, tree, [head]);
+    await GitHubStore.updateRef(p.draft.branch, commit.sha, false);
+    p.draft.head = commit.sha;
+    return '/' + repoPath.replace(/^source\//, '');
+  }
+
   async function uploadImages(files) {
     var p = state.current;
     if (!p || !p.draft || p.readOnly || p.removed) {
       toast('请先打开一篇草稿（保存过一次）再上传图片', 'err');
       return;
     }
-    var branch = p.draft.branch;
     showBusy('正在上传图片…');
     var inserted = 0;
     try {
       for (var i = 0; i < files.length; i += 1) {
-        var file = files[i];
         setBusyText('正在上传 ' + (i + 1) + ' / ' + files.length + '…');
-        var b64 = bytesToBase64(await file.arrayBuffer());
-        var blobSha = await GitHubStore.createBlobBase64(b64);
-        var now = new Date();
-        var mm = String(now.getMonth() + 1).padStart(2, '0');
-        var name = randomImageName(fileExt(file.name));
-        var repoPath = GitHubStore.imagesDir + now.getFullYear() + '/' + mm + '/' + name;
-        var head = await GitHubStore.branchHead(branch);
-        var hc = await GitHubStore.getCommit(head);
-        var tree = await GitHubStore.createTree(hc.tree.sha, [
-          { path: repoPath, mode: '100644', type: 'blob', sha: blobSha }
-        ]);
-        var commit = await GitHubStore.createCommit('draft: 上传图片 ' + name, tree, [head]);
-        await GitHubStore.updateRef(branch, commit.sha, false);
-        p.draft.head = commit.sha;
-
+        var urlPath = await uploadImageToDraft(files[i]);
+        if (!urlPath) break;
         if (state.current === p && !p.readOnly) {
-          var urlPath = '/' + repoPath.replace(/^source\//, '');
           insertBlock('![](' + urlPath + ')', true);
           inserted += 1;
         }
       }
-      toast('已上传 ' + files.length + ' 张图片到 ' + branch +
+      toast('已上传 ' + files.length + ' 张图片到 ' + p.draft.branch +
         (inserted ? '，并插入正文' : ''), 'ok');
       await refreshImageManager();
     } catch (e) {
@@ -1879,48 +1860,6 @@
     toast('新文章：保存后创建草稿分支 draft/' + Core.get(doc, 'abbrlink'));
   }
 
-  /** 启动时先问工作方式 */
-  function openWorkspaceChooser() {
-    function card(title, desc, onclick) {
-      return el('button', { class: 'ws-card', type: 'button', onclick: onclick }, [
-        el('b', { text: title }),
-        el('span', { text: desc })
-      ]);
-    }
-    var box = el('div', { class: 'ws-chooser' }, [
-      card('本地目录', '直接读写磁盘上的 source/_posts，和以前一样', function () {
-        $('#modal').classList.add('hidden');
-        if (state.mode === 'fs') { toast('当前已经在本地目录模式'); return; }
-        if (state.postsDir) { resumeLocal(); return; }
-        maybeOpenDirGuide();
-      }),
-      card('GitHub 仓库', '草稿存到分支，发布时合并到 main', function () {
-        $('#modal').classList.add('hidden');
-        if (state.mode === 'github') { toast('已经连接到 GitHub 仓库'); return; }
-        if (state.posts.some(function (p) { return p.dirty; })) {
-          openModal({
-            title: '切换到 GitHub 仓库？',
-            body: '<p class="tip">本地还有未保存的修改。这些修改会留在草稿里，切回本地目录时可以恢复，但不会写回磁盘。</p>',
-            actions: [
-              { label: '取消', value: null },
-              { label: '直接切换', primary: true, danger: true, value: 'go' }
-            ]
-          }).then(function (v) {
-            if (v === 'go') enterGitHub();
-          });
-          return;
-        }
-        enterGitHub();
-      })
-    ]);
-    openModal({
-      title: '选择工作方式',
-      body: box,
-      actions: [{ label: '取消', value: null }],
-      enterConfirm: false
-    });
-  }
-
   /** 日期 / abbrlink 的锁定规则 */
   function applyLocks() {
     if (!state.current) return;
@@ -2086,6 +2025,21 @@
 
   /** 把选中的图片写入 source/images 并返回站内路径 */
   async function importImage(file) {
+    if (state.mode === 'github') {
+      if (!state.current) { toast('请先打开一篇文章', 'err'); return ''; }
+      showBusy('正在上传图片…');
+      try {
+        var up = await uploadImageToDraft(file);
+        if (up) toast('图片已上传到草稿分支 ' + state.current.draft.branch, 'ok');
+        return up;
+      } catch (e) {
+        console.error('[上传图片]', e && e.request, e);
+        toast('上传失败：' + e.message, 'err');
+        return '';
+      } finally {
+        hideBusy();
+      }
+    }
     if (!state.hasImages) {
       var fake = '/images/' + new Date().getFullYear() + '/' + ('0' + (new Date().getMonth() + 1)).slice(-2) + '/' +
         randomImageName(fileExt(file.name));
@@ -3801,19 +3755,7 @@
   }
 
   function updateModeUI() {
-    var hint = $('#api-hint');
-
-    if (!hasFSA) {
-      hint.className = 'hint warn';
-      hint.innerHTML = '当前浏览器没有提供 <b>File System Access API</b>，无法直接读写本地文件。' +
-        '可以先用「导入文件夹」只读编辑、保存时下载文件；<br>' +
-        '要直接写回 <code>source/_posts</code>，请改用 <b>Chrome / Edge</b> 打开本页（双击 <code>index.html</code> 即可）。';
-    } else {
-      hint.className = 'hint';
-      hint.textContent = '';
-    }
-
-    renderDirDots();
+    renderGitHubStatus();
     renderDraftBar();
     var imgBtn = $('#btn-images');
     if (imgBtn) imgBtn.classList.toggle('hidden', state.mode !== 'github');
@@ -3862,193 +3804,17 @@
     applySidebar();
   }
 
-  /** 列表底部的状态圆点：绿=已连接，红=未连接；GitHub 模式换成仓库状态 */
-  function renderDirDots() {
-    var p = $('#dot-posts');
-    var im = $('#dot-images');
+  /** 列表底部：GitHub 连接状态（现在只有这一种工作方式） */
+  function renderGitHubStatus() {
     var gh = $('#dot-github');
-    if (!p || !im) return;
-
-    var isGH = state.mode === 'github';
-    if (gh) {
-      // 这个入口常驻：本地模式下是灰色「GitHub」，点它就能切过去
-      gh.classList.remove('hidden');
-      gh.classList.toggle('on', isGH);
-      var label = gh.querySelector('span');
-      if (isGH) {
-        if (label) label.textContent = 'GitHub · ' + state.posts.length + ' 篇';
-        gh.title = '已连接 ' + (state.githubRepo || '') + ' · main（点击查看）';
-      } else {
-        if (label) label.textContent = 'GitHub';
-        gh.title = '当前是本地目录，点击切换到 GitHub 仓库';
-      }
-    }
-    p.classList.toggle('hidden', isGH);
-    im.classList.toggle('hidden', isGH);
-    if (isGH) return;
-
-    var postsOk = state.mode === 'fs' && !!state.postsDir;
-    p.classList.toggle('on', postsOk);
-    p.title = postsOk
-      ? '文章目录已连接：' + (state.dirName || state.postsDir.name) + '（点击更换）'
-      : (state.rootRemembered
-        ? '上次的文章目录 ' + state.rootRemembered.name + ' 需要重新授权（点击处理）'
-        : '文章目录未连接（点击连接）');
-
-    var imgOk = !!state.hasImages;
-    im.classList.toggle('on', imgOk);
-    im.title = imgOk
-      ? '图片目录已连接：' + (state.imagesDir ? state.imagesDir.name : '') + '（点击更换）'
-      : (state.imagesRemembered
-        ? '上次的图片目录 ' + state.imagesRemembered.name + ' 需要重新授权（点击处理）'
-        : '图片目录未连接（点击连接）');
-  }
-
-  /** 两个目录是不是都连好了（文章目录能用 + 图片目录连上） */
-  function dirsReady() {
-    var postsOk = state.mode === 'fs' && !!state.postsDir;
-    return postsOk && !!state.hasImages;
-  }
-
-  /** 需要时才弹引导：第一次打开、或任一目录没连上 */
-  function maybeOpenDirGuide() {
-    if (dirsReady()) return false;
-    openDirGuide();
-    return true;
-  }
-
-  /**
-   * 连接目录引导：打开编辑器时自动弹一次，点左下角圆点也能随时回来改。
-   * 直接用 openModal 的 body 容器，选完目录原地刷新，不关窗。
-   */
-  function openDirGuide() {
-    var box = el('div', { class: 'guide' });
-
-    function rowOf(kind) {
-      var isPosts = kind === 'posts';
-      var ok = isPosts ? (state.mode === 'fs' && !!state.postsDir) : !!state.hasImages;
-      var remembered = isPosts ? state.rootRemembered : state.imagesRemembered;
-      var name = isPosts
-        ? (state.dirName || (state.postsDir ? state.postsDir.name : ''))
-        : (state.imagesDir ? state.imagesDir.name : (remembered ? remembered.name : ''));
-
-      var sub;
-      if (ok) {
-        sub = '已连接' + (name ? '：' + name : '') + (isPosts ? ' · ' + state.posts.length + ' 篇文章' : '');
-      } else if (remembered) {
-        sub = '已记住 ' + remembered.name + '，但浏览器重启后要补一次授权';
-      } else {
-        sub = isPosts
-          ? '必填。选项目根目录最省事，会自动识别 source/_posts'
-          : '可选。不连也能写文章，只是封面和正文图片存不进来';
-      }
-
-      var btns = el('div', { class: 'guide-btns' });
-      if (remembered && !ok) {
-        btns.appendChild(el('button', {
-          class: 'btn tiny', type: 'button', text: '重新授权',
-          onclick: function () { grant(kind); }
-        }));
-      }
-      btns.appendChild(el('button', {
-        class: 'btn tiny' + (ok ? '' : ' primary'), type: 'button',
-        text: ok ? '更换' : '选择目录',
-        onclick: function () { pick(kind); }
-      }));
-
-      return el('div', { class: 'guide-row' + (ok ? ' on' : '') }, [
-        el('i', { class: 'g-dot' }),
-        el('div', { class: 'guide-txt' }, [
-          el('div', { class: 'guide-name', text: isPosts ? '文章目录' : '图片目录' }),
-          el('div', { class: 'guide-sub', text: sub })
-        ]),
-        btns
-      ]);
-    }
-
-    function render() {
-      box.innerHTML = '';
-      box.appendChild(el('p', {
-        class: 'tip',
-        html: '选一次就好，浏览器会记住这两个目录，下次打开自动恢复。' +
-          '<br>想换目录，点左下角的圆点随时回来。'
-      }));
-      box.appendChild(rowOf('posts'));
-      box.appendChild(rowOf('images'));
-      renderDirDots();
-    }
-
-    async function pick(kind) {
-      if (!hasFSA) { toast('这个浏览器用不了目录选择，请换 Chrome / Edge 打开', 'err'); return; }
-      try {
-        if (kind === 'posts') {
-          var gotPosts = await FS.pick();
-          if (gotPosts) {
-            state.rootRemembered = null;
-            toast('文章目录已连接：' + state.dirName, 'ok');
-          }
-        } else {
-          var gotImages = await FS.pickImages();
-          if (gotImages) {
-            state.imagesRemembered = null;
-            toast('图片目录已连接', 'ok');
-          }
-        }
-      } catch (e) {
-        console.error(e);
-        toast((kind === 'posts' ? '打开文章目录失败：' : '连接图片目录失败：') + e.message, 'err');
-      }
-      updateModeUI();
-      render();
-    }
-
-    async function grant(kind) {
-      var h = kind === 'posts' ? state.rootRemembered : state.imagesRemembered;
-      if (!h) return;
-      try {
-        var perm = await h.requestPermission({ mode: 'readwrite' });
-        if (perm !== 'granted') { toast('没有拿到写入权限', 'err'); render(); return; }
-        if (kind === 'posts') {
-          state.rootRemembered = null;
-          await FS.attach(h);
-        } else {
-          state.imagesRemembered = null;
-          state.imagesDir = h;
-          state.imagesSource = 'manual';
-          state.imagesScope = state.mode === 'fs' ? state.projectId : null;
-          resetImageCache();
-          await idb.set('imagesScope', state.imagesScope);
-          state.hasImages = true;
-        }
-        toast('已重新授权', 'ok');
-      } catch (e) {
-        console.error(e);
-        toast('授权失败：' + e.message, 'err');
-      }
-      updateModeUI();
-      render();
-    }
-
-    render();
-
-    var actions = [];
-    if (legacyDrafts().length) actions.push({ label: '导入旧版草稿', value: 'legacy' });
-    if (!hasFSA) actions.push({ label: '导入文件夹', value: 'import' });
-    if (state.mode !== 'github') {
-      actions.push({ label: '改用 GitHub 仓库', onClick: function () { setTimeout(openWorkspaceChooser, 0); } });
-    }
-    actions.push({ label: '进入编辑器', primary: true, value: true });
-
-    return openModal({
-      title: '连接目录',
-      body: box,
-      enterConfirm: false,
-      actions: actions
-    }).then(function (v) {
-      if (v === 'import') importFolder();
-      if (v === 'legacy') importLegacyDrafts();
-      return v;
-    });
+    if (!gh) return;
+    var on = state.mode === 'github';
+    gh.classList.toggle('on', on);
+    var label = gh.querySelector('span');
+    if (label) label.textContent = on ? ('GitHub · ' + state.posts.length + ' 篇') : 'GitHub';
+    gh.title = on
+      ? '已连接 ' + (state.githubRepo || '') + ' · main（点击查看）'
+      : '未连接 GitHub（点击重试）';
   }
 
   /* ================================================================
@@ -4107,14 +3873,9 @@
   function bind() {
     cacheForm();
 
-    /* --- 目录连接：只剩底部两个圆点（顶部按钮已移除，弹窗由引导负责） --- */
-    $('#dot-posts').onclick = function () { openDirGuide(); };
-    $('#dot-images').onclick = function () { openDirGuide(); };
+    /* --- 左下角 GitHub 状态 --- */
     var dotGh = $('#dot-github');
-    if (dotGh) dotGh.onclick = function () {
-      if (state.mode === 'github') openGitHubInfo();
-      else openWorkspaceChooser();
-    };
+    if (dotGh) dotGh.onclick = openGitHubInfo;
 
     /* --- 侧栏收起 / 展开 --- */
     $('#btn-toggle-sidebar').onclick = toggleSidebar;
@@ -4437,51 +4198,20 @@
     applyTheme();
     updateModeUI();
 
-    var restored = false;
-
-    if (hasFSA) {
-      // 1) 先恢复上次单独连接的图片目录（不依赖文章目录）
-      var imgHandle = await idb.get('images');
-      if (imgHandle) {
-        try {
-          var ip = await imgHandle.queryPermission({ mode: 'readwrite' });
-          if (ip === 'granted') {
-            state.imagesDir = imgHandle;
-            state.imagesSource = 'manual';
-            state.imagesScope = await idb.get('imagesScope');
-            state.hasImages = true;
-          } else {
-            state.imagesRemembered = imgHandle; // 记住了，但这次要补一次授权
-          }
-        } catch (e) { /* 忽略 */ }
-      }
-
-      // 2) 再恢复文章目录
-      var handle = await idb.get('root');
-      if (handle) {
-        try {
-          var perm = await handle.queryPermission({ mode: 'readwrite' });
-          if (perm === 'granted') {
-            // 只恢复目录与列表，不自动打开文章：右侧保持灰色空态
-            if (await FS.attach(handle)) restored = true;
-          } else {
-            state.rootRemembered = handle;
-          }
-        } catch (e) {
-          console.warn('恢复目录失败', e);
-        }
-      }
+    // 本地目录模式已移除：双击打开只能看到一个提示，避免误以为还能写盘
+    if (location.protocol === 'file:') {
+      toast('本地模式已移除，请访问 https://zerokami.cn/tools/online-hexo-editor', 'err');
+      state.booted = true;
+      return;
     }
 
+    // 现在只有 GitHub 模式：直接连接；未登录会跳到授权页
+    if (window.GitHubStore) {
+      await enterGitHub();
+    } else {
+      toast('GitHub 模块未加载，无法进入在线编辑器', 'err');
+    }
     updateModeUI();
-    if (state.mode === 'demo') {
-      discoverDrafts();
-      if (state.posts.length) { reindex(); refreshMainView(); }
-    }
-    if (restored) toast('已从浏览器缓存恢复上次的目录', 'ok');
-
-    // 每次都先问工作方式：本地目录 / GitHub 仓库
-    openWorkspaceChooser();
     state.booted = true;
   }
 
@@ -4536,10 +4266,7 @@
     redo: function () { jumpHistory(1); },
     historyPush: pushHistory,
     updateModeUI: updateModeUI,
-    renderDirDots: renderDirDots,
-    openDirGuide: openDirGuide,
-    dirsReady: dirsReady,
-    maybeOpenDirGuide: maybeOpenDirGuide,
+    renderGitHubStatus: renderGitHubStatus,
     refreshMainView: refreshMainView,
     toggleSidebar: toggleSidebar,
     applyTheme: applyTheme,

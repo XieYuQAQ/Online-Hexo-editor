@@ -56,12 +56,6 @@
           <button id="dot-github" class="dir-dot" type="button" title="切换到 GitHub 仓库">
             <i class="dot-i"></i><span>GitHub</span>
           </button>
-          <button id="dot-posts" class="dir-dot" type="button" title="文章目录未连接（点击连接）">
-            <i class="dot-i"></i><span>文章目录</span>
-          </button>
-          <button id="dot-images" class="dir-dot" type="button" title="图片目录未连接（点击连接）">
-            <i class="dot-i"></i><span>图片目录</span>
-          </button>
         </div>
       </div>
     </div>
@@ -72,14 +66,13 @@
     <!-- 空态 -->
     <section id="empty" class="empty">
       <h1>Hexo 文章编辑器</h1>
-      <p>纯前端实现，直接读写本地 <code>source/_posts</code>。</p>
+      <p>直接编辑博客仓库里的 <code>source/_posts</code>：草稿存分支，发布合并到 main。</p>
       <ol class="steps">
-        <li>在弹出窗口里连接 <b>文章目录</b>（选项目根最省事，会自动找到 <code>source/_posts</code>），需要封面/配图再连 <b>图片目录</b></li>
-        <li>左侧点选文章 → 右侧编辑属性与正文</li>
-        <li><kbd>Ctrl</kbd> + <kbd>S</kbd> 保存回本地文件</li>
+        <li>首次打开会跳到 GitHub 授权，授权后自动读取仓库里的文章</li>
+        <li>左侧点选文章 → 点顶部「编辑」，改完保存成草稿</li>
+        <li>「发布」把草稿合并到 main，Netlify 自动构建</li>
       </ol>
-      <p class="hint">左下角的两个圆点随时能看到连接状态，点一下就能换目录。</p>
-      <p class="hint" id="api-hint"></p>
+      <p class="hint">左下角的 GitHub 状态随时能看到连接情况和篇数。</p>
     </section>
 
     <!-- 编辑态 -->

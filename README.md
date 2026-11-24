@@ -4,6 +4,10 @@
 
 纯前端（无后端、无构建、无依赖安装）的 Markdown 文章编辑器，直接读写本项目 Hexo 博客的 `source/_posts`，格式与 ZEROKAMI 站内已有文章完全一致。**因此本项目在图片路径、视频块使用等方面与各位的 Hexo 博客差异较大，可能并不适用于你的博客。**
 
+> **2026-11-24 更新：本地目录模式已移除，只保留 GitHub 模式。**
+> 唯一入口是 <https://zerokami.cn/tools/online-hexo-editor>；双击 `index.html` 不再能读写本地文件。
+> 下面「一、怎么打开」「二、能做什么」里关于本地目录、导入文件夹、下载模式的说明属于历史记录，实际行为以「六、GitHub 模式（在线版）」为准。
+
 ![编辑器主界面：左侧文章列表、中间文章属性、右侧所见即所得正文](https://zerokami.cn/images/2026/10/0imzlqmpao.jpg)
 
 ## 目录
@@ -21,13 +25,13 @@
 
 ```text
 hexo-editor/
-├── index.html              界面（双击即用，不需要任何服务）
+├── index.html              界面（在线版入口；本地双击只显示提示）
 ├── assets/
 │   ├── core.js             格式层：Front Matter 解析/序列化、abbrlink(crc32)、文件名、视频块
 │   ├── github.js           GitHub 存储层：认证入口、分支/提交/发布、图片 blob
 │   ├── app.js              编辑器主程序
 │   └── editor.css          样式
-├── test/                   10 套自动化测试，含可独立运行的文章样例
+├── test/                   9 套自动化测试，含可独立运行的文章样例
 │   ├── run.mjs             测试入口（npm test / npm run test:fixtures）
 │   └── *.test.mjs          各测试套件
 ├── package.json            仅开发测试需要，浏览器使用无需安装依赖
@@ -196,7 +200,7 @@ npm test
 npm run test:fixtures
 ```
 
-- `npm test` 运行 10 套测试：格式往返、字段编辑、选择器审计、UI、交互、文件操作、所见即所得、全量补充、GitHub 模式和缺陷回归。
+- `npm test` 运行 9 套测试：格式往返、字段编辑、选择器审计、UI、交互、所见即所得、全量补充、GitHub 模式和缺陷回归。
 - GitHub 模式那套用手写的内存 Git（blob / tree / commit / ref / compare / contents）和 mock fetch 跑，不发真实网络请求；覆盖列表元信息、编辑保存、单篇与批量发布、删除与撤销、图片引用扫描与待删除队列、新建文章全流程。
 - 默认优先只读检查相邻 Hexo 博客的 `source/_posts`；独立下载本项目时使用 `test/fixtures/posts` 中的 4 篇固定样例。
 - `npm run test:fixtures` 强制使用内置样例，不依赖本机博客目录。
@@ -222,7 +226,7 @@ npm run test:fixtures
 
 ### 入口与切换
 
-启动先选「本地目录 / GitHub 仓库」。左下角常驻一个 GitHub 状态：灰色表示当前是本地模式，点它可切到 GitHub；绿色显示「GitHub · N 篇」，点开是仓库信息（重新读取 / 切回本地目录）。切回本地会复用已授权的目录，不需要重新选。
+启动直接连接 GitHub 仓库（未登录会跳到授权页），不再询问工作方式。左下角显示「GitHub · N 篇」，点开可以查看仓库信息或重新读取列表。双击 `index.html` 只会提示改用在线版。
 
 ### 分支模型
 

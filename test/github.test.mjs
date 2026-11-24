@@ -61,7 +61,7 @@ function jsonRes(data, status) {
   });
 }
 
-async function boot() {
+async function boot(handler) {
   const html = fs.readFileSync(path.join(editorDir, 'index.html'), 'utf8')
     .replace(/<script src="assets\/[^"]+"><\/script>/g, '');
   const dom = new JSDOM(html, {
@@ -74,10 +74,33 @@ async function boot() {
   if (!w.TextDecoder) w.TextDecoder = TextDecoder;
   if (!w.TextEncoder) w.TextEncoder = TextEncoder;
   w.HEXO_EDITOR_REPO = REPO;
+  if (handler) w.fetch = handler;          // 必须在脚本启动前装好：现在启动即连 GitHub
+
+  // 记录加载遮罩是否真的出现过
+  w.__busySeen = false;
+  const busyEl = w.document.querySelector('#busy');
+  const obs = new w.MutationObserver(() => {
+    if (busyEl && !busyEl.classList.contains('hidden')) w.__busySeen = true;
+  });
+  obs.observe(busyEl, { attributes: true, attributeFilter: ['class'] });
+
   for (const file of ['core.js', 'github.js', 'app.js']) {
     w.eval(fs.readFileSync(path.join(editorDir, 'assets', file), 'utf8'));
   }
   await waitForBoot(dom);
+  obs.disconnect();
+  return dom;
+}
+
+/** 启动即进入 GitHub，并等到列表加载完 */
+async function bootWithServer(server, onCall) {
+  const dom = await boot((url, init) => {
+    if (onCall) onCall(String(url));
+    return server.handle(url, init);
+  });
+  const d = dom.window.document;
+  await waitFor(() => d.querySelectorAll('#post-list li').length >= 3, '列表加载');
+  await waitFor(() => d.querySelector('#busy').classList.contains('hidden'), '遮罩消失');
   return dom;
 }
 
@@ -91,12 +114,8 @@ async function waitFor(fn, label, timeout) {
 
 /* ---------------- 1. 列表元信息来自 front matter ---------------- */
 {
-  const dom = await boot();
-  const w = dom.window;
-  const d = w.document;
-
   const calls = [];
-  w.fetch = (url) => {
+  const handler = (url) => {
     const u = String(url);
     calls.push(u);
     if (u === API) {
@@ -126,25 +145,17 @@ async function waitFor(fn, label, timeout) {
     return jsonRes({ message: 'not mocked: ' + u }, 404);
   };
 
-  const ghCard = Array.from(d.querySelectorAll('.ws-card')).find((b) => /GitHub/.test(b.textContent));
-  check(!!ghCard, '启动选择器里有「GitHub 仓库」', d.querySelector('#modal-body')?.textContent);
+  const dom = await boot(handler);
+  const w = dom.window;
+  const d = w.document;
 
-  /* 入口常驻：关掉启动弹窗后，左下角仍能再次切换工作方式 */
-  d.querySelector('#modal-close').click();
-  await waitFor(() => d.querySelector('#modal').classList.contains('hidden'), '关闭启动选择器');
+  check(d.querySelector('#modal').classList.contains('hidden'), '启动不再弹「选择工作方式」');
+  check(!d.querySelector('.ws-card'), '没有本地目录入口');
+  check(!d.querySelector('#dot-posts') && !d.querySelector('#dot-images'), '本地目录圆点已移除');
   const ghEntry = d.querySelector('#dot-github');
-  check(!!ghEntry && !ghEntry.classList.contains('hidden'), '本地/未连接时也常驻 GitHub 入口');
-  check(!ghEntry.classList.contains('on'), '未连接时 GitHub 入口是灰的');
-  check(ghEntry.textContent.trim() === 'GitHub', '未连接时标签只有 GitHub', ghEntry.textContent.trim());
-  ghEntry.click();
-  await waitFor(() => !d.querySelector('#modal').classList.contains('hidden'), '点入口重新打开工作方式');
-  check(d.querySelector('#modal-title').textContent === '选择工作方式', '入口打开「选择工作方式」',
-    d.querySelector('#modal-title').textContent);
-  const card2 = Array.from(d.querySelectorAll('.ws-card')).find((b) => /GitHub/.test(b.textContent));
-  card2.click();
-  check(!d.querySelector('#busy').classList.contains('hidden'), '进入 GitHub 时弹出阻塞遮罩');
-  check(d.querySelector('#busy-text').textContent.length > 0, '遮罩里带提示文案',
-    d.querySelector('#busy-text').textContent);
+  check(!!ghEntry && ghEntry.classList.contains('on'), 'GitHub 状态为已连接（绿）');
+  check(ghEntry.textContent.indexOf('3 篇') !== -1, '状态里带篇数', ghEntry.textContent);
+  check(w.__busySeen === true, '加载过程中出现过阻塞遮罩');
 
   await waitFor(() => d.querySelectorAll('#post-list li').length === 3, '列表渲染出 3 篇');
   await waitFor(() => {
@@ -201,8 +212,7 @@ async function waitFor(fn, label, timeout) {
   check(!dotGh.classList.contains('hidden'), 'GitHub 模式下显示仓库状态');
   check(dotGh.classList.contains('on'), '仓库状态为已连接（绿）');
   check(dotGh.textContent.indexOf('3 篇') !== -1, '状态里带篇数', dotGh.textContent.trim());
-  check(d.querySelector('#dot-posts').classList.contains('hidden'), '文章目录圆点已隐藏');
-  check(d.querySelector('#dot-images').classList.contains('hidden'), '图片目录圆点已隐藏');
+  check(!d.querySelector('#dot-posts') && !d.querySelector('#dot-images'), '本地目录圆点已移除');
 
   /* 点状态 → 仓库信息弹窗 */
   dotGh.click();
@@ -210,7 +220,8 @@ async function waitFor(fn, label, timeout) {
   check(d.querySelector('#modal-title').textContent === 'GitHub 仓库', '弹窗标题为「GitHub 仓库」',
     d.querySelector('#modal-title').textContent);
   const infoBtns = Array.from(d.querySelectorAll('#modal-foot .btn')).map((b) => b.textContent);
-  check(infoBtns.indexOf('切换为本地目录') !== -1, '仓库信息里可切回本地目录', infoBtns.join(' | '));
+  check(infoBtns.indexOf('重新读取') !== -1, '仓库信息里可重新读取', infoBtns.join(' | '));
+  check(infoBtns.indexOf('切换为本地目录') === -1, '不再提供切回本地目录', infoBtns.join(' | '));
   check(infoBtns.indexOf('重新读取') !== -1, '仓库信息里可重新读取', infoBtns.join(' | '));
   d.querySelector('#modal-close').click();
   await waitFor(() => d.querySelector('#modal').classList.contains('hidden'), '弹窗关闭');
@@ -422,16 +433,11 @@ function makeGitServer(posts, opts) {
 }
 
 {
-  const dom = await boot();
-  const w = dom.window;
-  const d = w.document;
   const server = makeGitServer(POSTS);
   const calls = [];
-  w.fetch = (url, init) => { calls.push(String(url)); return server.handle(url, init); };
-
-  const ghCard = Array.from(d.querySelectorAll('.ws-card')).find((b) => /GitHub/.test(b.textContent));
-  ghCard.click();
-  await waitFor(() => d.querySelectorAll('#post-list li').length === 3, '进入 GitHub 列表');
+  const dom = await bootWithServer(server, (u) => calls.push(u));
+  const w = dom.window;
+  const d = w.document;
   await waitFor(() => d.querySelector('#post-list li .p-title').textContent === '排序测试', '标题已填充');
 
   /* 打开 main 上的文章 */
@@ -550,11 +556,10 @@ function makeGitServer(posts, opts) {
 
 /* ---------------- 4. 两篇草稿一起发布：只产生一次 main 提交 ---------------- */
 {
-  const dom = await boot();
+  const server = makeGitServer(POSTS);
+  const dom = await bootWithServer(server);
   const w = dom.window;
   const d = w.document;
-  const server = makeGitServer(POSTS);
-  w.fetch = (url, init) => server.handle(url, init);
 
   const titleOf = (li) => li.querySelector('.p-title span:last-child').textContent;
   const clickPost = (title) => {
@@ -563,9 +568,6 @@ function makeGitServer(posts, opts) {
     li.click();
   };
 
-  Array.from(d.querySelectorAll('.ws-card')).find((b) => /GitHub/.test(b.textContent)).click();
-  await waitFor(() => d.querySelectorAll('#post-list li').length === 3, '进入列表');
-  await waitFor(() => d.querySelector('#busy').classList.contains('hidden'), '列表加载完成');
 
   /* 第一篇：编辑 → 保存草稿 */
   clickPost('排序测试');
@@ -639,19 +641,15 @@ function makeGitServer(posts, opts) {
 
 /* ---------------- 5. 删除文章：待删除 → 撤销 → 再删除 → 发布生效 ---------------- */
 {
-  const dom = await boot();
+  const server = makeGitServer(POSTS);
+  const dom = await bootWithServer(server);
   const w = dom.window;
   const d = w.document;
-  const server = makeGitServer(POSTS);
-  w.fetch = (url, init) => server.handle(url, init);
   const PATH = 'source/_posts/30 排序测试.md';
 
   const modalBtn = (text) => Array.from(d.querySelectorAll('#modal-foot .btn'))
     .find((b) => b.textContent === text);
 
-  Array.from(d.querySelectorAll('.ws-card')).find((b) => /GitHub/.test(b.textContent)).click();
-  await waitFor(() => d.querySelectorAll('#post-list li').length === 3, '进入列表');
-  await waitFor(() => d.querySelector('#busy').classList.contains('hidden'), '列表加载完成');
 
   d.querySelectorAll('#post-list li')[0].click();
   await waitFor(() => d.querySelector('#f-title').value === '排序测试', '打开文章');
@@ -716,14 +714,10 @@ function makeGitServer(posts, opts) {
     ? { ...p, body: p.body + '\n\n![](/images/2026/10/TO6Gf9&ASSC@yAY1.jpg)' }
     : p));
 
-  const dom = await boot();
-  const w = dom.window, d = w.document;
   const server = makeGitServer(posts, { images: [{ path: IMG_USED }, { path: IMG_ORPHAN }] });
-  w.fetch = (url, init) => server.handle(url, init);
+  const dom = await bootWithServer(server);
+  const w = dom.window, d = w.document;
 
-  Array.from(d.querySelectorAll('.ws-card')).find((b) => /GitHub/.test(b.textContent)).click();
-  await waitFor(() => d.querySelectorAll('#post-list li').length === 3, '进入列表');
-  await waitFor(() => d.querySelector('#busy').classList.contains('hidden'), '列表加载完成');
   check(!d.querySelector('#btn-images').classList.contains('hidden'), 'GitHub 模式显示图片入口');
 
   /* 打开图片管理：两张图，引用数分别为 1 / 0 */
@@ -796,14 +790,10 @@ function makeGitServer(posts, opts) {
 
 /* ---------------- 7. 新建 → 保存草稿 → 发布 → 删除走待删除 ---------------- */
 {
-  const dom = await boot();
-  const w = dom.window, d = w.document;
   const server = makeGitServer(POSTS);
-  w.fetch = (url, init) => server.handle(url, init);
+  const dom = await bootWithServer(server);
+  const w = dom.window, d = w.document;
 
-  Array.from(d.querySelectorAll('.ws-card')).find((b) => /GitHub/.test(b.textContent)).click();
-  await waitFor(() => d.querySelectorAll('#post-list li').length === 3, '进入列表');
-  await waitFor(() => d.querySelector('#busy').classList.contains('hidden'), '列表加载完成');
 
   /* 新建 */
   d.querySelector('#btn-new').click();
