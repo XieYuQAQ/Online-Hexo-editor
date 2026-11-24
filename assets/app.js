@@ -709,17 +709,18 @@
     applyReadOnly();
   }
 
-  /** GitHub 模式下打开 main 上的文章：先拉内容，再走原有 openPost */
+  /** GitHub 模式下打开文章：草稿读对应分支，已发布读 main，再走原有 openPost */
   function openPostFromList(p) {
     if (!p) return;
     if (!p.github || p.loaded) { openPost(p); return; }
+    var branch = p.draft ? p.draft.branch : 'main';
     toast('正在读取 ' + p.name + '…');
-    GitHubStore.readPost(p.path, 'main').then(function (data) {
+    GitHubStore.readPost(p.path, branch).then(function (data) {
       p.raw = data.text;
       p.doc = Core.parsePost(data.text);
       p.sha = data.sha;
       p.loaded = true;
-      p.readOnly = true;
+      p.readOnly = !p.draft;
       rememberMeta(p, p.doc);
       openPost(p, { skipDraftCheck: true });
       reindex();
@@ -1016,20 +1017,22 @@
     var text = Core.stringifyPost(source.doc);
 
     source.saving = true;
+    var step = '读取分支';
     try {
+      step = '写入文件内容';
       var blobSha = await GitHubStore.createBlob(text);
       var entries = [{ path: path, mode: '100644', type: 'blob', sha: blobSha }];
       if (oldPath && oldPath !== path) {
         entries.push({ path: oldPath, mode: '100644', type: 'blob', sha: null });
       }
 
-      var head = null;
-      try { head = await GitHubStore.branchHead(branch); }
-      catch (e) { if (e.status !== 404) throw e; }
+      step = '检查草稿分支';
+      var head = await GitHubStore.findRef(branch);
 
       var base = source.draft && source.draft.base ? source.draft.base : null;
       var commitSha;
       if (head) {
+        step = '更新草稿提交';
         var headCommit = await GitHubStore.getCommit(head);
         if (!base) base = (headCommit.parents && headCommit.parents[0] && headCommit.parents[0].sha) || null;
         var tree = await GitHubStore.createTree(headCommit.tree.sha, entries);
@@ -1037,6 +1040,7 @@
         await GitHubStore.updateRef(branch, commit.sha, false);
         commitSha = commit.sha;
       } else {
+        step = '创建草稿分支';
         var mainSha = await GitHubStore.headSha('main');
         base = mainSha;
         var mainCommit = await GitHubStore.getCommit(mainSha);
@@ -1046,7 +1050,14 @@
           await GitHubStore.createRef(branch, c2.sha);
         } catch (e) {
           if (e.status !== 422 && e.status !== 409) throw e;
-          throw new Error('草稿分支刚被其他窗口创建，请再保存一次');
+          // 分支其实已经存在（上一次尝试建成功了）：退化成更新，不打断用户
+          var h2 = await GitHubStore.findRef(branch);
+          if (!h2) throw e;
+          var hc2 = await GitHubStore.getCommit(h2);
+          var t3 = await GitHubStore.createTree(hc2.tree.sha, entries);
+          var c3 = await GitHubStore.createCommit('draft: ' + title, t3, [h2]);
+          await GitHubStore.updateRef(branch, c3.sha, false);
+          c2 = c3;
         }
         commitSha = c2.sha;
       }
@@ -1062,7 +1073,7 @@
       source.isNew = false;
       source.dirty = false;
       source.savedOnce = true;
-      rememberMeta(source, source.doc);
+      // 不更新列表缓存：缓存代表 main 上的版本，草稿内容由 mergeDraftBranches 叠上去
       if (oldKey && oldKey !== draftKey(source)) {
         try { localStorage.removeItem(oldKey); } catch (e) { /* 忽略 */ }
       }
@@ -1074,7 +1085,8 @@
       toast('已保存到草稿 ' + branch, 'ok');
       return true;
     } catch (e) {
-      toast('保存草稿失败：' +
+      console.error('[草稿保存]', e && e.request, e);
+      toast('保存草稿失败（' + step + '）：' +
         (e.status === 422 ? '远端已更新，请刷新后重试' : e.message), 'err');
       return false;
     } finally {
@@ -1156,6 +1168,7 @@
       GitHubStore.deleteRef(branch).catch(function () { /* 删分支失败不影响发布 */ });
       return true;
     } catch (e) {
+      console.error('[发布]', e && e.request, e);
       if (e.status === 422) toast('main 已被更新，发布被拒绝，请重新打开草稿', 'err');
       else toast('发布失败：' + e.message, 'err');
       return false;
@@ -1182,22 +1195,29 @@
       try {
         var headCommit = await GitHubStore.getCommit(ref.sha);
         var base = (headCommit.parents && headCommit.parents[0] && headCommit.parents[0].sha) || null;
-        var items = await GitHubStore.listPostsOn(ref.branch, ref.sha);
-        for (var k = 0; k < items.length; k += 1) {
-          var it = items[k];
-          var text = await GitHubStore.readBlob(it.sha);
+        // 只看这个分支相对 main 真正改过的文件；不能拿整棵树，否则所有文章都会被当成草稿
+        var diff = await GitHubStore.compare('main', ref.sha);
+        var changed = ((diff && diff.files) || []).filter(function (f) {
+          return f.filename.indexOf(GitHubStore.postsDir) === 0 && /\.md$/i.test(f.filename);
+        });
+        for (var k = 0; k < changed.length; k += 1) {
+          var f = changed[k];
+          if (f.status === 'removed' || !f.sha) continue;   // 删除型草稿暂不展示
+          var path = f.filename;
+          var name = path.slice(GitHubStore.postsDir.length);
+          var text = await GitHubStore.readBlob(f.sha);
           var doc = Core.parsePost(text);
           var abbr = String(Core.get(doc, 'abbrlink') || '').toLowerCase();
           var target = (abbr && byAbbr[abbr]) ||
-            state.posts.filter(function (x) { return x.path === it.path; })[0] || null;
+            state.posts.filter(function (x) { return x.path === path; })[0] || null;
           // 正在编辑的这篇不动：编辑器里显示的是 memory 里的内容，替换 doc 会和可见正文对不上
           if (target && target === state.current) continue;
           if (target) {
-            target.path = it.path;
-            target.name = it.name;
+            target.path = path;
+            target.name = name;
             target.doc = doc;
             target.raw = text;
-            target.sha = it.sha;
+            target.sha = f.sha;
             target.loaded = true;
             target.readOnly = false;
             target.editing = true;
@@ -1207,11 +1227,11 @@
           } else {
             var np = {
               id: uid(),
-              path: it.path,
-              name: it.name,
+              path: path,
+              name: name,
               doc: doc,
               raw: text,
-              sha: it.sha,
+              sha: f.sha,
               dirty: false,
               savedOnce: true,
               github: true,

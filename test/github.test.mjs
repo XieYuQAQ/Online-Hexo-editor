@@ -280,10 +280,29 @@ function makeGitServer(posts) {
   const firstCommit = setCommit('init', firstTree, []);
   refs.set('main', firstCommit);
 
+  const resolve = (x) => refs.get(x) || x;
   const treeOf = (sha) => {
-    const c = commits.get(sha);
-    return new Map(trees.get(c ? c.tree : sha) || new Map());
+    const s = resolve(sha);
+    const c = commits.get(s);
+    return new Map(trees.get(c ? c.tree : s) || new Map());
   };
+
+  function ancestors(sha) {
+    const out = [];
+    let cur = resolve(sha);
+    while (cur && commits.has(cur)) {
+      out.push(cur);
+      cur = commits.get(cur).parents[0];
+    }
+    return out;
+  }
+
+  /** GitHub 的 compare 用三点语义：先找 merge base，再比 tree */
+  function mergeBase(a, b) {
+    const set = new Set(ancestors(a));
+    for (const c of ancestors(b)) if (set.has(c)) return c;
+    return null;
+  }
 
   function diff(base, head) {
     const a = treeOf(base), b = treeOf(head);
@@ -317,8 +336,9 @@ function makeGitServer(posts) {
         ? jsonRes({ ref: 'refs/heads/' + branch, object: { sha } })
         : jsonRes({ message: 'Not Found' }, 404);
     }
-    if (method === 'GET' && rel === '/git/matching-refs/heads/draft/') {
-      return jsonRes([...refs.keys()].filter((b) => b.startsWith('draft/'))
+    if (method === 'GET' && (m = rel.match(/^\/git\/matching-refs\/heads\/(.*)$/))) {
+      const prefix = 'refs/heads/' + m[1];
+      return jsonRes([...refs.keys()].filter((b) => ('refs/heads/' + b).startsWith(prefix))
         .map((b) => ({ ref: 'refs/heads/' + b, object: { sha: refs.get(b) } })));
     }
     if (method === 'GET' && (m = rel.match(/^\/git\/trees\/(.+)$/))) {
@@ -335,13 +355,15 @@ function makeGitServer(posts) {
         : jsonRes({ sha: m[1], encoding: 'base64', content: Buffer.from(text, 'utf8').toString('base64') });
     }
     if (method === 'GET' && (m = rel.match(/^\/git\/commits\/(.+)$/))) {
-      const c = commits.get(decodeURIComponent(m[1]));
+      const c = commits.get(resolve(decodeURIComponent(m[1])));
       return c
         ? jsonRes({ sha: m[1], tree: { sha: c.tree }, parents: c.parents.map((s) => ({ sha: s })), message: c.message })
         : jsonRes({ message: 'Not Found' }, 404);
     }
     if (method === 'GET' && (m = rel.match(/^\/compare\/(.+)\.\.\.(.+)$/))) {
-      return jsonRes(diff(decodeURIComponent(m[1]), decodeURIComponent(m[2])));
+      const a = resolve(decodeURIComponent(m[1]));
+      const b = resolve(decodeURIComponent(m[2]));
+      return jsonRes(diff(mergeBase(a, b) || a, b));
     }
     if (method === 'GET' && (m = rel.match(/^\/contents\/(.+)$/))) {
       const p = decodeURIComponent(m[1]);
@@ -389,7 +411,8 @@ function makeGitServer(posts) {
   const w = dom.window;
   const d = w.document;
   const server = makeGitServer(POSTS);
-  w.fetch = (url, init) => server.handle(url, init);
+  const calls = [];
+  w.fetch = (url, init) => { calls.push(String(url)); return server.handle(url, init); };
 
   const ghCard = Array.from(d.querySelectorAll('.ws-card')).find((b) => /GitHub/.test(b.textContent));
   ghCard.click();
@@ -438,6 +461,27 @@ function makeGitServer(posts) {
   const head2 = server.refs.get('draft/aaa111');
   check(server.commits.get(head2).parents[0] === head1, '第二次提交基于上一次草稿', JSON.stringify(server.commits.get(head2).parents));
   check(server.refs.get('main') === server.firstCommit, '保存不影响 main');
+
+  /* 刷新：草稿分支重新并入列表，只影响真正改动过的那一篇 */
+  const blob0 = calls.filter((u) => /\/git\/blobs\//.test(u)).length;
+  d.querySelector('#btn-refresh').click();
+  await waitFor(() => d.querySelectorAll('#post-list li').length === 3, '刷新后列表 3 篇');
+  await waitFor(() => d.querySelector('#post-list li .p-badge'), '刷新后草稿标签重新挂上');
+  await new Promise((r) => setTimeout(r, 150));
+  const blob1 = calls.filter((u) => /\/git\/blobs\//.test(u)).length;
+  check(blob1 - blob0 === 1, '只读了改动过的那一个文件', String(blob1 - blob0));
+  const badges = d.querySelectorAll('#post-list li .p-badge');
+  check(badges.length === 1, '只有一篇带草稿标签', String(badges.length));
+  const draftLi = Array.from(d.querySelectorAll('#post-list li')).find((li) => li.querySelector('.p-badge'));
+  const draftTitle = draftLi && draftLi.querySelector('.p-title span:last-child').textContent;
+  check(!!draftLi && draftTitle === '排序测试（改）', '草稿项标题是改后的', draftTitle);
+
+  /* 重新打开草稿：读草稿分支，不是 main */
+  draftLi.click();
+  await waitFor(() => d.querySelector('#f-description').value === '第二次保存', '打开草稿读到草稿内容');
+  check(d.querySelector('#readonly-hint').textContent === '草稿 · draft/aaa111', '打开草稿提示分支',
+    d.querySelector('#readonly-hint').textContent);
+  check(!d.querySelector('#btn-publish').classList.contains('hidden'), '打开草稿就有「发布」');
 
   /* 发布 → 一次 commit 合并到 main，再删掉分支 */
   const beforePublish = [...server.commits.keys()].length;

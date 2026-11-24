@@ -34,6 +34,7 @@
           var err = new Error(msg);
           err.status = res.status;
           err.data = data;
+          err.request = init.method + ' ' + path;
           throw err;
         }
         return data;
@@ -229,6 +230,21 @@
     return headSha(branch);
   }
 
+  /**
+   * 精确查一个分支，返回 commit sha 或 null。
+   * 用 matching-refs 而不是 /git/ref/heads/...，分支不存在时返回空数组，
+   * 不会在浏览器控制台留下 404。
+   */
+  function findRef(branch) {
+    var full = 'refs/heads/' + branch;
+    return request('/git/matching-refs/heads/' + branch).then(function (refs) {
+      var hit = (refs || []).filter(function (r) {
+        return r && r.ref === full && r.object && r.object.sha;
+      })[0];
+      return hit ? hit.object.sha : null;
+    });
+  }
+
   /** 分支是否存在 */
   function branchExists(branch) {
     return headSha(branch).then(function () { return true; }).catch(function (e) {
@@ -272,6 +288,7 @@
     compare: compare,
     listDrafts: listDrafts,
     branchHead: branchHead,
+    findRef: findRef,
     branchExists: branchExists,
     listPostsOn: listPostsOn,
     request: request,
