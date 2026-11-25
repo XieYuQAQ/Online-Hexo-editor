@@ -435,6 +435,66 @@ html[data-theme="light"] .post-list .p-badge-del {
 .empty .hint { font-size: 12px; color: var(--fg-faint); }
 .empty .hint.warn { color: var(--warn); }
 
+/* 授权失败：替换掉步骤说明的错误块 */
+.auth-error {
+  max-width: 460px;
+  margin: 22px auto 0;
+  padding: 15px 18px;
+  text-align: left;
+  background: var(--err-soft);
+  border: 1px solid var(--line-2);
+  border-left: 3px solid var(--err);
+  border-radius: var(--radius);
+}
+.auth-error-title {
+  margin: 0 0 6px;
+  font-size: 13.5px;
+  color: var(--fg);
+}
+.auth-error-reason {
+  margin: 0 0 13px;
+  font-size: 12.5px;
+  line-height: 1.75;
+  color: var(--fg-dim);
+}
+
+/* 登录过期：盖在弹窗之上，但不动 #modal 的内容 */
+.auth-expired {
+  position: fixed;
+  inset: 0;
+  z-index: 400;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--overlay);
+}
+.auth-expired-box {
+  width: 100%;
+  max-width: 420px;
+  padding: 22px 24px 18px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+}
+.ae-title {
+  margin: 0 0 8px;
+  font-size: 15px;
+  color: var(--fg);
+}
+.ae-text {
+  margin: 0 0 18px;
+  font-size: 13px;
+  line-height: 1.75;
+  color: var(--fg-dim);
+}
+.ae-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .editor {
   display: flex;
   flex-direction: column;

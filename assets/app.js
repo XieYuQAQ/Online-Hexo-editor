@@ -725,6 +725,86 @@
     }
   }
 
+  /* ---------------- 授权回调结果 / 登录过期 ---------------- */
+
+  // 回调失败时 github-auth-callback.js 会带 ?auth=error&reason=...
+  var AUTH_REASON_TEXT = {
+    access_denied: '你在 GitHub 页面上拒绝了授权。',
+    no_code: 'GitHub 没有返回授权码，可能是授权被取消、页面停留过久，或回调地址不一致。',
+    state_mismatch: '登录校验失败（state 不匹配）。可能是授权页停留太久，或 Cookie 被清理，重试一次即可。',
+    exchange_failed: '服务端用授权码换取 token 失败，通常是网络问题或 GitHub App 配置有误。',
+    no_token: 'GitHub 没有返回 access token，请确认 GitHub App 的权限配置。',
+    app_not_configured: '服务端没有配置 GITHUB_APP_CLIENT_ID / GITHUB_APP_CLIENT_SECRET。',
+    token_secret_missing: '服务端没有配置 GITHUB_TOKEN_SECRET（用于加密 Cookie）。',
+    unknown: '授权没有完成，原因未知。'
+  };
+
+  /** 读 URL 上的授权失败标记；没有则返回空串 */
+  function readAuthError() {
+    try {
+      var q = new URLSearchParams(location.search);
+      if (q.get('auth') !== 'error') return '';
+      return q.get('reason') || 'unknown';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  /** 成功回调里的 ?auth=ok 从地址栏抹掉，避免刷新后又出现一次 */
+  function stripAuthOk() {
+    try {
+      var q = new URLSearchParams(location.search);
+      if (q.get('auth') !== 'ok') return;
+      q.delete('auth');
+      q.delete('reason');
+      var rest = q.toString();
+      history.replaceState(null, '', location.pathname + (rest ? '?' + rest : '') + location.hash);
+    } catch (e) { /* 忽略 */ }
+  }
+
+  /** 授权失败：停在引导页，给出原因和重试入口（绝不再自动跳授权页） */
+  function showAuthError(reason) {
+    var box = $('#auth-error');
+    if (!box) return;
+    var txt = $('#auth-error-reason');
+    if (txt) txt.textContent = AUTH_REASON_TEXT[reason] || AUTH_REASON_TEXT.unknown;
+    box.classList.remove('hidden');
+    var steps = $('#empty-steps');
+    if (steps) steps.classList.add('hidden');
+    var hint = $('#empty-hint');
+    if (hint) hint.classList.add('hidden');
+  }
+
+  var authExpiredShownAt = 0;
+
+  /** 会话中途 401：先 flush 防抖中的草稿，再提示重新登录 */
+  function showAuthExpired() {
+    if (!state.booted) return;                       // 启动阶段由 enterGitHub 负责跳授权
+    var box = $('#auth-expired');
+    if (!box) return;
+    if (!box.classList.contains('hidden')) return;
+    if (Date.now() - authExpiredShownAt < 30000) return;  // 批量请求 401 时不反复弹
+    authExpiredShownAt = Date.now();
+    var saved = saveDraft();                         // scheduleDraft 是 800ms 防抖，这里强制落盘
+    var txt = $('#auth-expired-text');
+    if (txt) {
+      txt.textContent = saved
+        ? '需要重新授权 GitHub 才能继续读写仓库。当前改动已存到浏览器本地草稿，重新登录后可以恢复。'
+        : '需要重新授权 GitHub 才能继续读写仓库。已经保存到草稿分支的内容不受影响。';
+    }
+    box.classList.remove('hidden');
+  }
+
+  function hideAuthExpired() {
+    var box = $('#auth-expired');
+    if (box) box.classList.add('hidden');
+  }
+
+  function relogin() {
+    hideAuthExpired();
+    if (window.GitHubStore) GitHubStore.login();
+  }
+
   /** 重新读取 GitHub 列表（sha 没变的文章仍走缓存，不重复拉正文） */
   async function refreshGitHub() {
     if (state.mode !== 'github') return false;
@@ -3007,7 +3087,7 @@
 
   function saveDraft(p) {
     p = p || state.current;
-    if (!p || !p.dirty) return;
+    if (!p || !p.dirty) return false;
     try {
       p.projectId = p.projectId || state.projectId;
       if (state.current === p) p.pendingName = form.fileName.value;
@@ -3021,7 +3101,8 @@
         savedOnce: !!p.savedOnce,
         baseRaw: p.raw
       }));
-    } catch (e) { /* 忽略配额错误 */ }
+      return true;
+    } catch (e) { return false; }  // 配额错误等：本地暂存失败，提示里不能说「已暂存」
   }
 
   function clearDraft(p) {
@@ -3402,6 +3483,15 @@
   function bind() {
     cacheForm();
 
+    /* --- 授权失败重试 / 登录过期提示 --- */
+    var retryAuth = $('#btn-auth-retry');
+    if (retryAuth) retryAuth.onclick = function () { if (window.GitHubStore) GitHubStore.login(); };
+    var laterAuth = $('#btn-auth-later');
+    if (laterAuth) laterAuth.onclick = hideAuthExpired;
+    var reloginBtn = $('#btn-auth-relogin');
+    if (reloginBtn) reloginBtn.onclick = relogin;
+    window.addEventListener('hexo-editor:auth-expired', showAuthExpired);
+
     /* --- 左下角 GitHub 状态 --- */
     var dotGh = $('#dot-github');
     if (dotGh) dotGh.onclick = openGitHubInfo;
@@ -3716,6 +3806,14 @@
 
     // 现在只有 GitHub 模式：直接连接；未登录会跳到授权页
     if (window.GitHubStore) {
+      // 回调失败：停在引导页给提示，绝不自动再跳授权（否则 401 → 授权 → 失败 → 401 死循环）
+      var authError = readAuthError();
+      if (authError) {
+        showAuthError(authError);
+        state.booted = true;
+        return;
+      }
+      stripAuthOk();
       await enterGitHub();
     } else {
       toast('GitHub 模块未加载，无法进入在线编辑器', 'err');

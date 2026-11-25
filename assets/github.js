@@ -38,6 +38,10 @@
           err.status = res.status;
           err.data = data;
           err.request = init.method + ' ' + path;
+          // 登录态失效：交给 app.js 统一提示（启动阶段的 401 由 enterGitHub 自己跳授权）
+          if (res.status === 401) {
+            try { window.dispatchEvent(new CustomEvent('hexo-editor:auth-expired')); } catch (e) { /* 忽略 */ }
+          }
           throw err;
         }
         return data;
@@ -59,10 +63,8 @@
     return btoa(bin);
   }
 
-  /** 登录入口：整页跳转，回调后回到编辑器 */
-  function login(returnTo) {
-    var back = returnTo || (location.pathname + location.search);
-    try { sessionStorage.setItem('hexo-editor:return', back); } catch (e) { /* ignore */ }
+  /** 登录入口：整页跳转，回调后回到编辑器（回跳地址由服务端 GITHUB_AUTH_RETURN 固定） */
+  function login() {
     location.href = '/api/github/auth/start';
   }
 
