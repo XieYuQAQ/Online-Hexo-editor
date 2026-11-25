@@ -410,6 +410,13 @@ function makeGitServer(posts, opts) {
     }
     if (method === 'POST' && rel === '/git/blobs') return jsonRes({ sha: setBlob(body.content) });
     if (method === 'POST' && rel === '/git/trees') {
+      // 与代理层 github-api.js 的白名单对齐：编辑器只能写文章与图片两个目录。
+      // 这里逐个断言，任何一次发布/保存写出界都会让测试直接失败。
+      (body.tree || []).forEach((e) => {
+        const p = String(e.path == null ? '' : e.path);
+        const allowed = /^source\/(?:_posts|images)\/[^\\]+$/.test(p) && !/(^|\/)\.\.?(\/|$)/.test(p);
+        check(allowed, 'POST /git/trees 的路径必须落在 source/_posts 或 source/images 下', '实际路径：' + p);
+      });
       const map = treeOf(body.base_tree);
       (body.tree || []).forEach((e) => {
         if (e.sha === null) map.delete(e.path);
