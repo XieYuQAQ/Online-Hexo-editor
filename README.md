@@ -95,8 +95,11 @@
 ## 安全模型
 
 - 所有请求走同域 `/api/github/*`，由 Netlify Function 代理并注入 token
-- token 存在 httpOnly cookie 里，浏览器脚本接触不到
-- 代理只放行配置的那一个仓库
+- token 存在 httpOnly cookie 里（`Path=/api/github`，只随 API 请求发送），浏览器脚本接触不到
+- 代理只放行配置的那一个仓库（精确匹配，`Xxx-backup` 这类同前缀仓库不放行）
+- 代理只放行编辑器实际用到的端点与方法：`GET` 读仓库/分支/tree/blob/commit/文章与图片，`POST` 建 blob/tree/commit/refs，`PATCH` 只更新 `main` 与 `draft/*`，`DELETE` 只能删 `draft/*`
+- token 过期时由 Function 静默续期；续期失败返回 401 但**不清 Cookie**（避免并发续期互相覆盖），由前端引导重新授权
+- 授权失败（`?auth=error&reason=…`）时前端停在引导页显示原因，不会自动反复跳授权页
 - 登录通过 `/api/github/auth/start` 整页跳转，回调后回到编辑器
 
 ---

@@ -4,6 +4,13 @@
 > 范围：`tools/hexo-editor`（编辑器）＋ 博客仓库的分支策略 ＋ Netlify 构建配置
 > 不在范围内：Hexo 主题、文章内容、Waline
 
+> **实现现状（2026-11 更新）**：本文是最初的设计稿，最终实现与原文有出入，冲突处以
+> `README.md` 和博客仓库 `source/netlify/functions/` 为准。已知差异：
+>
+> - 本地目录模式已移除，只剩 GitHub 模式；启动时的「选择模式」弹窗不再存在（§1、§12 第 1 条）
+> - cookie 作用域改为 `Path=/api/github`，401 不再清 Cookie（§3.2、§3.4）
+> - 端点白名单按「方法 + 路径」收敛，含 `DELETE` 仅限 `draft/*`（§11）
+
 ---
 
 ## 1. 目标与边界
@@ -75,9 +82,13 @@ GitHub App + Netlify Function，用户级授权（user-to-server token）。
 
 1. 用户点「连接 GitHub」→ 跳转 `https://github.com/login/oauth/authorize?client_id=…&redirect_uri=https://zerokami.cn/.netlify/functions/github-auth-callback`
 2. 回调 Function 用 `client_id + client_secret + code` 换 token
-3. token 写入 `HttpOnly; Secure; SameSite=Lax; Path=/` cookie（加密后存放，密钥在 Netlify 环境变量）
+3. token 写入 `HttpOnly; Secure; SameSite=Lax; Path=/api/github` cookie（加密后存放，密钥在 Netlify 环境变量）
+   - 收窄 Path 后，访问博客文章、图片、`/comment/*` 都不会再携带 token
+   - `gh_oauth_state` 例外：回调挂在 `/.netlify/functions/github-auth-callback`，必须保持 `Path=/`，否则读不到
 4. 后续每个 `/api/github/*` 请求由 Function 读取 cookie、解密、调 GitHub API
 5. token 8 小时过期；Function 检测到 401 时用 refresh token 静默续期并重设 cookie
+   - 续期失败时**不下发清 Cookie**：并发请求里只有第一个能换到新 token，其余拿旧 token 打 GitHub 必然 401，清掉会覆盖刚写入的新 Cookie
+   - 真需要重登时由前端跳授权，回调页直接覆盖写入新 `gh_token`
 
 **环境变量**（Netlify）：
 
@@ -99,7 +110,11 @@ GITHUB_REPO              # XieYu-Zk/zerokami
 
 - token 不进 localStorage、不进前端内存、不出现在 URL。
 - Function 只代理白名单端点（见 §11），不接受任意路径，避免变成开放代理。
-- 所有写操作校验仓库名为 `XieYu-Zk/zerokami`，防止误配。
+- 仓库校验用「精确匹配或前缀带斜杠」：只写 `startsWith(PREFIX)` 会放行 `ZEROKAMI-STUDIO-backup` 这类同前缀仓库。
+- 路径里出现 `%2e` / `%2f` / `%5c` 一律拒绝（中文文件名的 `%E4` 之类不受影响），堵住 `..%2f` 形式的编码绕过。
+- 请求的 `Accept` 不透传给 GitHub，统一固定 `application/vnd.github+json`；响应固定带 `X-Content-Type-Options: nosniff`。
+- 401 不清 Cookie（见 §3.2 第 5 步），避免并发续期互相覆盖。
+- `gh_oauth_state` 比较用 sha256 + `crypto.timingSafeEqual`。
 
 ---
 
@@ -330,21 +345,31 @@ abbrlink = crc32(title) 的十六进制，不补零
 
 ## 11. API 映射
 
-| 操作 | 端点 |
+下表路径均省略 `/api/github` 前缀；白名单按 **方法 + 路径** 双重校验，不匹配一律 403。
+
+| 操作 | 方法 + 路径 |
 |---|---|
 | 仓库信息 | `GET /repos/{owner}/{repo}` |
-| 分支列表 | `GET /repos/{owner}/{repo}/git/matching-refs/heads/draft/` |
-| 目录树 | `GET /repos/{owner}/{repo}/git/trees/{sha}?recursive=1` |
-| 读文件 | `GET /repos/{owner}/{repo}/contents/{path}?ref={branch}` |
+| 分支 HEAD | `GET /repos/{owner}/{repo}/git/ref/heads/{branch}` |
+| 草稿分支（列表 / 精确查） | `GET /repos/{owner}/{repo}/git/matching-refs/heads/draft/…` |
+| 目录树 | `GET /repos/{owner}/{repo}/git/trees/{sha}` |
+| 读 blob | `GET /repos/{owner}/{repo}/git/blobs/{sha}` |
+| 读 commit | `GET /repos/{owner}/{repo}/git/commits/{sha}` |
+| 读文件 | `GET /repos/{owner}/{repo}/contents/source/_posts/…` 或 `…/contents/source/images/…` |
+| 分支差异 | `GET /repos/{owner}/{repo}/compare/{base}...{head}` |
 | 创建 blob | `POST /repos/{owner}/{repo}/git/blobs` |
 | 创建 tree | `POST /repos/{owner}/{repo}/git/trees` |
 | 创建 commit | `POST /repos/{owner}/{repo}/git/commits` |
-| 创建分支 | `POST /repos/{owner}/{repo}/git/refs` |
-| 更新分支 | `PATCH /repos/{owner}/{repo}/git/refs/heads/{branch}` |
-| 删除分支 | `DELETE /repos/{owner}/{repo}/git/refs/heads/{branch}` |
-| 分支差异 | `GET /repos/{owner}/{repo}/compare/{base}...{head}` |
+| 创建草稿分支 | `POST /repos/{owner}/{repo}/git/refs`（`body.ref` 必须是 `refs/heads/draft/…`）|
+| 更新分支 | `PATCH /repos/{owner}/{repo}/git/refs/heads/main` 或 `…/git/refs/heads/draft/…` |
+| 删除分支 | `DELETE /repos/{owner}/{repo}/git/refs/heads/draft/…` |
 
-Function 白名单只放行以上路径模式，其余返回 404。
+补充约束：
+
+- `PUT` 前端从未使用，白名单不接受。
+- `DELETE` 只能作用于 `draft/*`，`main` 与任何其他分支都会被拒。
+- 读文件限定在 `source/_posts/` 与 `source/images/`，读不到仓库里的其他文件。
+- 仓库名校验为精确匹配或 `PREFIX + '/'` 前缀，`Xxx-backup` 这类同前缀仓库不放行。
 
 ---
 
@@ -363,7 +388,9 @@ Function 白名单只放行以上路径模式，其余返回 404。
 
 | 场景 | 处理 |
 |---|---|
-| 401 token 过期 | Function 自动 refresh；失败则跳登录 |
+| 401 启动时未登录 | 直接跳 `/api/github/auth/start` 授权 |
+| 401 会话中途过期 | Function 自动 refresh；失败返回 401 但不清 Cookie，前端弹出「登录已过期」提示（先把防抖中的草稿落盘），点「重新登录」才跳授权 |
+| 授权失败 `?auth=error` | 停在引导页显示 `reason` 的中文原因 + 「重新登录」按钮，不再自动跳授权（否则会 401 → 授权 → 失败 → 401 死循环）|
 | 403 权限不足 | 提示重新安装 GitHub App 并确认仓库授权 |
 | 409 / 422 ref 冲突 | 提示「远端已更新」，刷新列表，不覆盖 |
 | 发布时 main 已前进 | 拒绝发布，提示重开草稿 |
