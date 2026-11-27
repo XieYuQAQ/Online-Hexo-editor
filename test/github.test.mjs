@@ -126,6 +126,7 @@ async function waitFor(fn, label, timeout) {
     if (u === API + '/git/ref/heads/main') return jsonRes({ object: { sha: 'headsha' } });
     if (u === API + '/git/trees/headsha?recursive=1') {
       return jsonRes({
+        truncated: false,
         tree: POSTS.map((p) => ({
           path: 'source/_posts/' + p.name, mode: '100644', type: 'blob', sha: p.sha, size: 200
         }))
@@ -381,6 +382,7 @@ function makeGitServer(posts, opts) {
       const map = treeOf(decodeURIComponent(m[1]));
       return jsonRes({
         sha: m[1],
+        truncated: false,
         tree: [...map.entries()].map(([p, sha]) => ({ path: p, mode: '100644', type: 'blob', sha, size: 1 }))
       });
     }
@@ -940,3 +942,54 @@ function makeGitServer(posts, opts) {
   if (failed) process.exitCode = 1;
 }
 
+
+/* 首次保存遇到并发更新。只用内存 Git，分别模拟无关文章和同一篇文章的修改。 */
+for (const samePost of [false, true]) {
+  const server = makeGitServer(POSTS);
+  const { window: w } = await bootWithServer(server);
+  const d = w.document;
+  await waitFor(() => d.querySelector('#post-list li .p-title')?.textContent === '排序测试', '文章列表加载');
+  d.querySelector('#post-list li').click();
+  await waitFor(() => d.querySelector('#body').textContent.includes('正文三十'), '打开原文');
+  d.querySelector('#btn-edit').click();
+  const editor = w.HexoEditor;
+  editor.setBody(editor.getBody() + '\n本地编辑');
+  const store = w.GitHubStore;
+  const createRef = store.createRef;
+  let attempts = 0;
+  store.createRef = async (branch, sha) => {
+    if (++attempts > 1) return createRef(branch, sha);
+    const head = server.refs.get('main');
+    const path = samePost ? editor.state.current.path : 'source/_posts/other.md';
+    const blob = await store.createBlob('并发编辑');
+    const tree = await store.createTree(server.commits.get(head).tree, [{ path, sha: blob, type: 'blob', mode: '100644' }]);
+    const moved = await store.createCommit('更新 main', tree, [head]);
+    server.refs.set('main', moved.sha);
+    throw Object.assign(new Error('分支已前进'), { status: 409 });
+  };
+  const saved = await editor.savePost();
+  const draft = server.refs.get('draft/aaa111');
+  if (samePost) {
+    check(!saved && !draft && attempts === 1, '同一篇文章已更新时保留远端版本');
+    check(editor.state.current.dirty && editor.getBody().includes('本地编辑'), '冲突后保留本地编辑');
+  } else {
+    check(saved && attempts === 2 && server.commits.get(draft)?.parents[0] === server.refs.get('main'),
+      '无关文章更新时，以新 main 重试一次');
+    check(server.treeOf(draft).has('source/_posts/other.md'), '草稿包含并发更新的其他文章');
+  }
+  w.close();
+}
+{
+  const { window: w } = await bootWithServer(makeGitServer(POSTS));
+  for (const [reply, call] of [
+    [{ files: Array(300).fill({}) }, () => w.GitHubStore.compare('base', 'head')],
+    [{ truncated: true, tree: [] }, () => w.GitHubStore.getTree('head')]
+  ]) {
+    w.fetch = () => jsonRes(reply);
+    const rejected = await call().then(() => false, () => true);
+    check(rejected, '变更列表或目录树不完整时停止操作');
+  }
+  w.close();
+}
+console.log(`[github] ${checks - failed}/${checks} 通过`);
+if (failed) process.exitCode = 1;

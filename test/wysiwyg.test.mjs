@@ -57,7 +57,7 @@ const bodyEl = d.querySelector('#body');
     const body = Core.splitFront(raw).body;
     E.loadFromText(f, raw, {});
     E.setBody(body);
-    if (E.getBody() !== body) bad.push(f);
+    if (E.currentText() !== raw || E.getBody() !== body.replace(/\r\n/g, '\n')) bad.push(f);
   }
   check(bad.length === 0, `${files.length} 篇正文「文本 → DOM → 文本」逐字节一致`, bad.slice(0, 3).join(' / '));
 }
@@ -174,7 +174,8 @@ function key(k) {
   const out = E.currentText();
   check(out.startsWith(raw), '改动后 front matter 与原文逐字节相同');
   check(out.endsWith('新增一行'), '新增内容在末尾');
-  check(Core.parsePost(out).body === Core.parsePost(raw).body + '\n\n新增一行', '正文只多出新增的那一行');
+  const eol = Core.parsePost(raw).eol;
+  check(out === raw + eol + eol + '新增一行', '正文只多出新增的那一行，保持原文件换行格式');
 }
 
 /* ================================================================
