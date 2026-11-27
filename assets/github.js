@@ -10,7 +10,8 @@
   var BASE = '/api/github/repos/' + REPO;
   var POSTS_DIR = 'source/_posts/';
   var IMAGES_DIR = 'source/images/';
-  var IMAGE_EXT = /\.(png|jpe?g|gif|webp|avif|svg|bmp|ico)$/i;
+  // 与代理层的可写集合同步：svg 不在允许列表里，列出来只会让「删除」必然失败
+  var IMAGE_EXT = /\.(png|jpe?g|gif|webp|avif|bmp|ico)$/i;
   var TEXT_FILE_EXT = /\.(md|markdown|html?|ejs|styl|css|ya?ml|json|js|mjs|txt)$/i;
 
   function url(path) {
@@ -93,8 +94,8 @@
   /** 列出 source/_posts 下的所有 Markdown */
   function listPosts(branch) {
     return headSha(branch).then(function (sha) {
-      return request('/git/trees/' + sha + '?recursive=1').then(function (tree) {
-        return (tree.tree || []).filter(function (n) {
+      return getTree(sha).then(function (entries) {
+        return entries.filter(function (n) {
           return n.type === 'blob' && n.path.indexOf(POSTS_DIR) === 0 && /\.md$/i.test(n.path);
         }).map(function (n) {
           return {
@@ -226,12 +227,18 @@
 
   function getTree(sha) {
     return request('/git/trees/' + sha + '?recursive=1').then(function (tree) {
-      return tree.tree || [];
+      if (!tree || tree.truncated !== false || !Array.isArray(tree.tree)) throw new Error('未能取得完整 Git 文件树');
+      return tree.tree;
     });
   }
 
   function compare(base, head) {
-    return request('/compare/' + base + '...' + head);
+    return request('/compare/' + base + '...' + head).then(function (diff) {
+      if (!diff || !Array.isArray(diff.files) || diff.files.length >= 300) {
+        throw new Error('GitHub 未能确认完整的变更列表，请拆分变更后重试');
+      }
+      return diff;
+    });
   }
 
   /** 所有 draft/* 分支（refs/heads/draft/xxx） */

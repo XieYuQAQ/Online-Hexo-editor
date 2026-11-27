@@ -715,12 +715,95 @@
   }
 
   /* ------------------------------------------------------------------ *
+   * 图片类型
+   * 与博客仓库 source/netlify/functions/lib/github-writes.js 的规则保持一致：
+   * 只有这几种位图能写进 source/images，且文件头必须与扩展名相符。
+   * ------------------------------------------------------------------ */
+
+  var IMAGE_KINDS = ['png', 'jpg', 'gif', 'webp', 'bmp', 'ico', 'avif'];
+
+  function normalizeImageExt(ext) {
+    var e = String(ext || '').toLowerCase().replace(/^\./, '');
+    if (e === 'jpeg') e = 'jpg';
+    return IMAGE_KINDS.indexOf(e) === -1 ? '' : e;
+  }
+
+  /** 从文件名取图片类型；不在允许列表里返回空串 */
+  function imageKindFromName(name) {
+    var m = /\.([A-Za-z0-9]+)$/.exec(String(name || ''));
+    return m ? normalizeImageExt(m[1]) : '';
+  }
+
+  function bytesAscii(bytes, start, end) {
+    var s = '';
+    for (var i = start; i < end; i += 1) s += String.fromCharCode(bytes[i]);
+    return s;
+  }
+
+  function u32be(bytes, o) {
+    return ((bytes[o] << 24) | (bytes[o + 1] << 16) | (bytes[o + 2] << 8) | bytes[o + 3]) >>> 0;
+  }
+
+  function u32le(bytes, o) {
+    return ((bytes[o + 3] << 24) | (bytes[o + 2] << 16) | (bytes[o + 1] << 8) | bytes[o]) >>> 0;
+  }
+
+  function u16le(bytes, o) {
+    return (bytes[o + 1] << 8) | bytes[o];
+  }
+
+  /**
+   * 按文件头判断真实图片类型，规则与代理层 imageKind() 逐条对应。
+   * @param {Uint8Array|Buffer} bytes
+   * @returns {'png'|'jpg'|'gif'|'webp'|'bmp'|'ico'|'avif'|''}
+   */
+  function imageKind(bytes) {
+    var b = bytes;
+    var len = (b && b.length) || 0;
+    if (!len) return '';
+
+    if (len >= 33 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 &&
+        b[4] === 0x0d && b[5] === 0x0a && b[6] === 0x1a && b[7] === 0x0a &&
+        u32be(b, 8) === 13 && bytesAscii(b, 12, 16) === 'IHDR' &&
+        u32be(b, 16) && u32be(b, 20)) return 'png';
+
+    if (len >= 4 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'jpg';
+
+    if (len >= 13 && (bytesAscii(b, 0, 6) === 'GIF87a' || bytesAscii(b, 0, 6) === 'GIF89a') &&
+        u16le(b, 6) && u16le(b, 8)) return 'gif';
+
+    if (len >= 20 && bytesAscii(b, 0, 4) === 'RIFF' && bytesAscii(b, 8, 12) === 'WEBP' &&
+        ['VP8 ', 'VP8L', 'VP8X'].indexOf(bytesAscii(b, 12, 16)) !== -1 &&
+        u32le(b, 4) === len - 8) return 'webp';
+
+    if (len >= 26 && bytesAscii(b, 0, 2) === 'BM' &&
+        u32le(b, 14) >= 12 && u32le(b, 10) < len) return 'bmp';
+
+    if (len >= 22 && u32le(b, 0) === 0x00010000 && u16le(b, 4) > 0 &&
+        6 + 16 * u16le(b, 4) <= len) return 'ico';
+
+    if (len >= 16 && bytesAscii(b, 4, 8) === 'ftyp') {
+      var end = u32be(b, 0);
+      if (end >= 16 && end <= len) {
+        for (var i = 8; i + 4 <= end; i += 4) {
+          if (i !== 12 && ['avif', 'avis'].indexOf(bytesAscii(b, i, i + 4)) !== -1) return 'avif';
+        }
+      }
+    }
+
+    return '';
+  }
+
+  /* ------------------------------------------------------------------ *
    * 导出
    * ------------------------------------------------------------------ */
 
   return {
     CANONICAL_ORDER: CANONICAL_ORDER,
     KNOWN_FIELDS: KNOWN_FIELDS,
+    imageKind: imageKind,
+    imageKindFromName: imageKindFromName,
+    IMAGE_KINDS: IMAGE_KINDS,
     parsePost: parsePost,
     stringifyPost: stringifyPost,
     createPost: createPost,

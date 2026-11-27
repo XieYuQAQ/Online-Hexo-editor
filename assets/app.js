@@ -1286,7 +1286,21 @@
       toast('图片只能存进草稿：请先点「编辑」并保存一次草稿', 'err');
       return '';
     }
-    var b64 = bytesToBase64(await file.arrayBuffer());
+
+    // 代理层只接受这几种位图，并且会核对文件头；这里先拦一次，避免传完才报错
+    var kindByName = Core.imageKindFromName(file.name);
+    if (!kindByName) {
+      toast('「' + file.name + '」不是可上传的图片格式（仅 ' + Core.IMAGE_KINDS.join(' / ') + '）', 'err');
+      return '';
+    }
+    var bytes = new Uint8Array(await file.arrayBuffer());
+    var kindReal = Core.imageKind(bytes);
+    if (kindReal !== kindByName) {
+      toast('「' + file.name + '」的文件内容与扩展名不符，已跳过', 'err');
+      return '';
+    }
+
+    var b64 = bytesToBase64(bytes);
     var blobSha = await GitHubStore.createBlobBase64(b64);
     var now = new Date();
     var mm = String(now.getMonth() + 1).padStart(2, '0');
@@ -1313,19 +1327,30 @@
     }
     showBusy('正在上传图片…');
     var inserted = 0;
+    var uploaded = 0;
+    var skipped = 0;
     try {
       for (var i = 0; i < files.length; i += 1) {
+        if (state.current !== p || p.readOnly || p.removed) break;
         setBusyText('正在上传 ' + (i + 1) + ' / ' + files.length + '…');
         var urlPath = await uploadImageToDraft(files[i]);
-        if (!urlPath) break;
+        if (!urlPath) {
+          skipped += 1;      // 类型不符的文件单独提示并跳过，不打断其余上传
+          continue;
+        }
+        uploaded += 1;
         if (state.current === p && !p.readOnly) {
           insertBlock('![](' + urlPath + ')', true);
           inserted += 1;
         }
       }
-      toast('已上传 ' + files.length + ' 张图片到 ' + p.draft.branch +
-        (inserted ? '，并插入正文' : ''), 'ok');
-      await refreshImageManager();
+      if (uploaded) {
+        toast('已上传 ' + uploaded + ' 张图片到 ' + p.draft.branch +
+          (inserted ? '，并插入正文' : '') + (skipped ? '，跳过 ' + skipped + ' 个文件' : ''), 'ok');
+        await refreshImageManager();
+      } else if (skipped) {
+        toast('没有可上传的图片：' + skipped + ' 个文件被跳过', 'err');
+      }
     } catch (e) {
       console.error('[上传图片]', e && e.request, e);
       toast('上传失败：' + e.message, 'err');
@@ -1412,6 +1437,20 @@
     var oldKey = oldPath ? draftKey({ projectId: source.projectId, path: oldPath }) : '';
     var text = Core.stringifyPost(source.doc);
 
+    // 每次换基底都核对编辑开始时的文件版本，也检查改名的目标是否已被占用。
+    async function saveOnHead(head, entries) {
+      var parent = await GitHubStore.getCommit(head);
+      var files = await GitHubStore.getTree(parent.tree.sha);
+      var original = files.find(function (f) { return f.path === oldPath; });
+      var destination = files.find(function (f) { return f.path === path; });
+      if ((original && original.sha) !== (source.sha || undefined) ||
+          (path !== oldPath && destination)) {
+        throw new Error('远端文章已变更或文件名已被占用，本地改动已保留');
+      }
+      var tree = await GitHubStore.createTree(parent.tree.sha, entries);
+      return GitHubStore.createCommit('draft: ' + title, tree, [head]);
+    }
+
     source.saving = true;
     showBusy('正在保存到草稿…');
     var step = '读取分支';
@@ -1420,7 +1459,7 @@
       setBusyText('保存到草稿：' + step);
       var blobSha = await GitHubStore.createBlob(text);
       var entries = [{ path: path, mode: '100644', type: 'blob', sha: blobSha }];
-      if (oldPath && oldPath !== path) {
+      if (source.sha && oldPath && oldPath !== path) {
         entries.push({ path: oldPath, mode: '100644', type: 'blob', sha: null });
       }
 
@@ -1433,10 +1472,8 @@
       if (head) {
         step = '更新草稿提交';
         setBusyText('保存到草稿：' + step);
-        var headCommit = await GitHubStore.getCommit(head);
-        if (!base) base = (headCommit.parents && headCommit.parents[0] && headCommit.parents[0].sha) || null;
-        var tree = await GitHubStore.createTree(headCommit.tree.sha, entries);
-        var commit = await GitHubStore.createCommit('draft: ' + title, tree, [head]);
+        if (!source.draft) throw new Error('同名草稿已存在，请先打开该草稿');
+        var commit = await saveOnHead(head, entries);
         await GitHubStore.updateRef(branch, commit.sha, false);
         commitSha = commit.sha;
       } else {
@@ -1444,21 +1481,25 @@
         setBusyText('保存到草稿：' + step);
         var mainSha = await GitHubStore.headSha('main');
         base = mainSha;
-        var mainCommit = await GitHubStore.getCommit(mainSha);
-        var tree2 = await GitHubStore.createTree(mainCommit.tree.sha, entries);
-        var c2 = await GitHubStore.createCommit('draft: ' + title, tree2, [mainSha]);
+        var c2 = await saveOnHead(mainSha, entries);
         try {
           await GitHubStore.createRef(branch, c2.sha);
         } catch (e) {
           if (e.status !== 422 && e.status !== 409) throw e;
-          // 分支其实已经存在（上一次尝试建成功了）：退化成更新，不打断用户
           var h2 = await GitHubStore.findRef(branch);
-          if (!h2) throw e;
-          var hc2 = await GitHubStore.getCommit(h2);
-          var t3 = await GitHubStore.createTree(hc2.tree.sha, entries);
-          var c3 = await GitHubStore.createCommit('draft: ' + title, t3, [h2]);
-          await GitHubStore.updateRef(branch, c3.sha, false);
-          c2 = c3;
+          if (h2) {
+            if (h2 !== c2.sha) throw new Error('另一份同名草稿已创建，本地改动已保留');
+          } else if (e.status === 409) {
+            // 409 还可能是「main 在这几毫秒里前进了」：代理层要求新提交的父提交
+            // 正好是当前 main。以新的 main 为基底重建一次，别让这次保存白丢。
+            var mainSha2 = await GitHubStore.headSha('main');
+            var c4 = await saveOnHead(mainSha2, entries);
+            await GitHubStore.createRef(branch, c4.sha);
+            base = mainSha2;
+            c2 = c4;
+          } else {
+            throw e;
+          }
         }
         commitSha = c2.sha;
       }
@@ -1519,7 +1560,7 @@
       var files = (diff && diff.files) || [];
       if (!files.length) continue;                    // 没有差异的分支跳过
 
-      var base = post && post.draft ? post.draft.base : null;
+      var base = (diff.merge_base_commit && diff.merge_base_commit.sha) || (post && post.draft ? post.draft.base : null);
       if (base && base !== mainSha) {
         var moved = await GitHubStore.compare(base, mainSha);
         var touched = Object.create(null);
@@ -1677,7 +1718,7 @@
       return await publishDraftBranches([branch]);
     } catch (e) {
       console.error('[发布]', e && e.request, e);
-      if (e.status === 422) toast('main 已被更新，发布被拒绝，请重新打开草稿', 'err');
+      if (e.status === 422 || e.status === 409) toast('main 已被更新，发布被拒绝，请重新打开草稿', 'err');
       else toast('发布失败：' + e.message, 'err');
       return false;
     } finally {
@@ -1726,7 +1767,7 @@
       return await publishDraftBranches(branches);
     } catch (e) {
       console.error('[批量发布]', e && e.request, e);
-      if (e.status === 422) toast('main 已被更新，发布被拒绝，请刷新后重试', 'err');
+      if (e.status === 422 || e.status === 409) toast('main 已被更新，发布被拒绝，请刷新后重试', 'err');
       else toast('发布失败：' + e.message, 'err');
       return false;
     } finally {
@@ -2600,7 +2641,7 @@
     suppress = true;
     bodyEl.innerHTML = '';
     var st = { inFence: false };
-    String(text == null ? '' : text).split('\n').forEach(function (t) {
+    String(text == null ? '' : text).split(/\r?\n/).forEach(function (t) {
       var d = document.createElement('div');
       d.className = 'cl';
       d.setAttribute('data-t', lineType(t, st));
@@ -2950,7 +2991,7 @@
       renderBody(bodyText(), info0 ? info0.a : undefined);
     }
     refreshTypes();
-    state.current.doc.body = bodyText();
+    state.current.doc.body = bodyText().replace(/\n/g, state.current.doc.eol || '\n');
     markDirty();
     updateStats();
     updateCursor();
@@ -3872,6 +3913,7 @@
     renderGitHubStatus: renderGitHubStatus,
     resolveImageUrl: resolveImageUrl,
     refreshMainView: refreshMainView,
+    uploadImages: uploadImages,
     toggleSidebar: toggleSidebar,
     applyTheme: applyTheme,
     setTheme: setTheme,
