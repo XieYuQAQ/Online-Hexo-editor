@@ -23,8 +23,8 @@ function check(ok, label, extra) {
   }
 }
 
-const REPO = 'XieYu-Zk/ZEROKAMI-STUDIO';
-const API = '/api/github/repos/' + REPO;
+const REPO = 'example-owner/example-blog';
+const API = '/api/github/repo';
 
 /* 三篇虚构文章：日期跨度足够验证排序，标签有交集也有独有 */
 const POSTS = [
@@ -75,7 +75,6 @@ async function boot(handler) {
   if (!w.TextEncoder) w.TextEncoder = TextEncoder;
   if (!w.URL.createObjectURL) w.URL.createObjectURL = () => 'blob:mock-' + Math.random().toString(36).slice(2);
   if (!w.URL.revokeObjectURL) w.URL.revokeObjectURL = () => {};
-  w.HEXO_EDITOR_REPO = REPO;
   if (handler) w.fetch = handler;          // 必须在脚本启动前装好：现在启动即连 GitHub
 
   // 记录加载遮罩是否真的出现过

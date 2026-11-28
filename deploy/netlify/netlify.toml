@@ -1,0 +1,38 @@
+# Copy to the Hexo repository root, or merge into its existing netlify.toml.
+[build]
+  command = "npm ci && npx hexo generate"
+  publish = "public"
+  functions = "netlify/functions"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+[[redirects]]
+  from = "/netlify/*"
+  to = "/404.html"
+  status = 404
+  force = true
+
+# Keep the auth route before the API wildcard.
+[[redirects]]
+  from = "/api/github/auth/start"
+  to = "/.netlify/functions/github-auth-start"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/github/*"
+  to = "/.netlify/functions/github-api"
+  status = 200
+  force = true
+
+# Uncomment both routes only when serving the editor through an external static deployment.
+# [[redirects]]
+#   from = "/tools/online-hexo-editor"
+#   to = "/.netlify/functions/online-hexo-editor-proxy"
+#   status = 200
+#
+# [[redirects]]
+#   from = "/tools/online-hexo-editor/*"
+#   to = "/.netlify/functions/online-hexo-editor-proxy"
+#   status = 200

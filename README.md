@@ -44,7 +44,7 @@
 | 仓库 | 单一仓库、单一 `main` 分支；站点由 Netlify 监听 `main` 自动构建 |
 | 运行环境 | 必须与 `/api/github/*` 代理、`/.netlify/functions/github-auth-*` 授权函数**同源**部署 |
 
-最后一条是硬性的：cookie 只在同站请求里发送，单独把前端丢到 GitHub Pages 上打开是连不上的（原因见[部署](#部署)）。
+页面、登录回调和 API 使用同一入口域名。可以由博客主站提供入口，也可以由带有 Functions 的独立编辑器站点提供，见[部署](#部署)。
 
 ---
 
@@ -201,13 +201,13 @@ abbrlink 的行为约定：
 - `Path=/api/github` 意味着访问博客页面、图片、评论接口时都不会捎带 token
 - `gh_oauth_state` 是例外，必须保持 `Path=/`：回调挂在 `/.netlify/functions/github-auth-callback`，收窄路径会 100% `state_mismatch`
 - state 校验用 sha256 归一化后 `crypto.timingSafeEqual`，长度不等也不抛错
-- 仓库校验是「小写全等 或 `PREFIX + '/'` 前缀」，只写 `startsWith(PREFIX)` 会放行 `xxx-backup` 这类同前缀仓库
+- 代理只访问 `GITHUB_REPO` 配置的仓库。前端统一请求 `/api/github/repo`，旧仓库路由仅匹配同一个已配置仓库
 - 端点白名单按**方法 + 路径**双重校验：`GET` 限仓库信息、ref、tree、blob、commit、`source/_posts|images` 下的 contents、compare；`POST` 限 blob / tree / commit / refs；`PATCH` 只允许 `main` 与 `draft/*`；`DELETE` 只能删 `draft/*`；`PUT` 一律不接受
 - 写 `tree` 时路径必须落在 `source/_posts/` 或 `source/images/` 下，后缀与文件头都要对；`POST /git/refs` 的 `body.ref` 只能是 `refs/heads/draft/*`
 - `PATCH` ref 要求新 commit 的父提交等于分支当前 head，`force` 只接受 `false`；冲突返回 `409`，编辑器据此提示重开草稿
 - token 过期由函数用 refresh token 静默续期；续期失败返回 `401` 但**不清 Cookie**（并发续期时清 Cookie 会覆盖刚写入的新值），由前端弹「登录已过期」
 - 授权失败会 302 回 `?auth=error&reason=…`，前端停在引导页显示原因，不会自动再跳授权页
-- 代理响应统一带 `X-Content-Type-Options: nosniff`；编辑器页面额外带 `X-Frame-Options` 与 `Referrer-Policy`
+- API 响应带 `Cache-Control: no-store` 与 `X-Content-Type-Options: nosniff`。通过子路径代理发布时，代理也为静态资源设置安全响应头
 
 ---
 
@@ -221,11 +221,12 @@ hexo-editor/
 │   ├── github.js                存储层：认证入口、仓库/分支/提交/发布、blob 读写
 │   ├── app.js                   主程序：列表、编辑器、草稿、发布、图片管理、快捷键
 │   └── editor.css               全部样式
+├── deploy/netlify/              Netlify Functions 和博客路由模板
 ├── test/
 │   ├── run.mjs                  串行跑全部套件
 │   ├── helpers.mjs              语料定位、选文、等待启动
 │   ├── fixtures/posts/          4 篇内置样例
-│   └── *.test.mjs               10 套测试
+│   └── *.test.mjs               11 套测试
 ├── docs/
 │   └── github-mode-plan.md      最初的设计稿（部分内容已被实现取代）
 ├── package.json                 仅测试需要；浏览器使用无需安装依赖
@@ -235,7 +236,7 @@ hexo-editor/
 
 三个脚本用最朴素的 `<script>` 顺序加载，共享 `window.HexoCore` / `window.GitHubStore`；`core.js` 是 UMD，Node 里可以直接 `require` 做单测。
 
-**注意**：本仓库只有前端。`/api/github/*` 代理与 `github-auth-*` 授权函数不在这个仓库里，需要按[部署](#部署)一节的说明放到承载站点的 Netlify 项目中。
+按[部署](#部署)将随附的 Functions 放到处理编辑器登录和 API 的 Netlify 项目中。
 
 ---
 
@@ -249,7 +250,7 @@ npm test               # 自动找语料：相邻博客仓库的 source/_posts�
 npm run test:fixtures  # 强制用 test/fixtures/posts 的 4 篇样例
 ```
 
-10 套、约 490 条断言（数量随语料篇数变化，以命令行输出为准）：
+11 套测试：
 
 | 套件 | 内容 |
 |---|---|
@@ -263,267 +264,144 @@ npm run test:fixtures  # 强制用 test/fixtures/posts 的 4 篇样例
 | `auth` | `?auth=error` 不自动跳授权、会话中途 401 的提示与草稿落盘 |
 | `images` | 7 种位图的魔数识别，必须与代理层的白名单逐条对齐 |
 | `upload` | 真实加载页面跑上传链路：合法 PNG 通过，`.ejs` / `.pdf` 被前端拦下 |
+| `netlify` | 用模拟请求验证目标仓库、授权回调及静态资源代理 |
 
 补充说明：
 
 - 语料目录可用 `HEXO_EDITOR_POSTS_DIR` 指定，默认按「相邻博客仓库 → 内置样例」的顺序查找；单套可 `node test/xxx.test.mjs` 直接跑
 - 全部测试不发真实网络请求、不执行构建、不推送任何东西
-- `github` 套件里的 `[草稿保存] Error: 远端文章已变更…` 是**故意制造冲突**的用例输出，不代表失败，看最后的 `Suites: 10, failed: 0`
+- `github` 套件里的 `[草稿保存] Error: 远端文章已变更…` 是**故意制造冲突**的用例输出，不代表失败，看最后的 `Suites: 11, failed: 0`
 
 ---
 
 ## 部署
 
-### 0. 先理解三块拼图
+同一份前端可以复用到不同的 Hexo 博客。编辑器从当前域名请求 `/api/github/repo`，由该域名下的 Netlify Function 根据 `GITHUB_REPO` 选择博客仓库。示例里的 `blog.example.com` 是博客主站，`editor.example.com` 是独立编辑器站点。
 
-| 组成 | 放在哪 | 作用 |
-|---|---|---|
-| 编辑器前端 | 任意静态托管（本文以 GitHub Pages 为例） | 页面本身 |
-| 子路径代理 | 承载站点的 Netlify 项目 | 把 `/tools/online-hexo-editor/*` 转发到前端，让它落在你的域名下 |
-| 授权 + API 代理 | 同一个 Netlify 项目 | `/api/github/*`：校验登录态、注入 token、限仓库限端点 |
+### 选择部署方式
 
-为什么前端不能直接用自己的域名打开：登录态在 `SameSite=Lax` 的 cookie 里，而且 `Path=/api/github`。前端若跑在 `*.github.io`，请求打到自己的域时既没有 `/api/github` 这个端点，也带不上主站 cookie，必定 401。所以正确姿势是**用同域子路径代理把页面「搬」到主站名下**。
+| 方案 | 用户打开的地址 | 编辑器文件发布到 | OAuth 回调、API 和环境变量配置在哪 |
+|---|---|---|---|
+| [A 随主站发布](#方案-a-随主站发布) | `https://blog.example.com/tools/online-hexo-editor/` | 博客主站 | 博客主站的 Netlify 项目 |
+| [B 主站代理独立静态站](#方案-b-主站代理独立静态站) | `https://blog.example.com/tools/online-hexo-editor/` | 独立静态站，例如另一个 Netlify 项目或 GitHub Pages | 博客主站的 Netlify 项目 |
+| [C 编辑器独立运行](#方案-c-编辑器独立运行) | `https://editor.example.com/` | 独立的 Netlify 编辑器项目 | 独立的 Netlify 编辑器项目 |
 
-（也可以把前端静态文件直接放进站点的 `publish` 目录，这样就省掉子路径代理这一块，授权与 API 代理仍然需要；代价是改编辑器要重新构建整个站点。）
+主站已在 Netlify 上、希望编辑器随博客一起更新，选 A。想保留现有主站入口，又想独立发布前端，选 B。希望编辑器有自己的入口和登录会话，选 C。
 
-```
-https://你的域名/tools/online-hexo-editor/
-  ├── /api/github/*                    → Netlify Function（github-api）
-  └── /.netlify/functions/github-auth-* → Netlify Function（授权）
-```
+### 安装 Functions 和 API 路由
 
-### 1. 前置条件
+以下步骤在表中**处理 OAuth 和 API 的 Netlify 项目**里执行。
 
-- [ ] 一个 Hexo 博客仓库，`source/_posts` 与 `source/images` 都在里面；私有仓库也可以
-- [ ] 该仓库已接入 Netlify，`main` 推送能自动构建
-- [ ] 一个能绑定域名的 Netlify 站点（HTTPS 必须，`Secure` cookie 依赖它）
-- [ ] 仓库 Settings → Pages 可用（用于托管前端）
-- [ ] 本地有 Node.js 18+（跑测试；Netlify 构建也用它）
-
-### 2. 把前端发到 GitHub Pages
-
-1. Fork 本仓库到你的账号（也可以直接新建仓库再把文件推上去）。
-2. Settings → Pages → Source 选 `Deploy from a branch`，分支 `main`，目录 `/ (root)`。
-3. 记下 Pages 地址，形如 `https://你的用户名.github.io/你的仓库名`，后面配 `ONLINE_HEXO_EDITOR_UPSTREAM` 要用。
-
-编辑器默认指向一个写死的仓库名。两种改法，任选其一：
-
-```html
-<!-- index.html：必须放在 assets/github.js 之前 -->
-<script>window.HEXO_EDITOR_REPO = '你的用户名/你的博客仓库';</script>
-```
-
-```js
-// assets/github.js 第 9 行
-var REPO = root.HEXO_EDITOR_REPO || '你的用户名/你的博客仓库';
-```
-
-这个值必须和服务端的 `GITHUB_REPO` 完全一致（服务端不区分大小写），否则所有请求都会 403。
-
-### 3. 创建 GitHub App
-
-GitHub → Settings → Developer settings → GitHub Apps → **New GitHub App**：
-
-| 项 | 填什么 |
-|---|---|
-| GitHub App name | 任意，例如 `hexo-editor-你的名字` |
-| Homepage URL | 你的站点地址 |
-| **User authorization callback URL** | `https://你的域名/.netlify/functions/github-auth-callback` |
-| Webhook | 取消勾选 Active（本项目不用 webhook） |
-| Repository permissions → **Contents** | **Read and write** |
-| Repository permissions → Metadata | Read（必选基线，自动带上） |
-| 其他权限 | 全部 No access |
-| Where can this app be installed | 仅自己的账号即可 |
-
-创建后：
-
-1. 记下 **Client ID**；
-2. 点 **Generate a new client secret**，立刻复制 **Client secret**（只显示一次）；
-3. 左侧 **Install App** → 选择账号 → 选择 **Only select repositories** → 勾选你的博客仓库 → Install。
-
-> 走的是 GitHub App 的 user-to-server 授权流：回调拿到 `access_token`（8 小时）与 `refresh_token`，所以能静默续期。使用者还必须对目标仓库有 push 权限，否则能登录但写不进去。
-
-### 4. 放置 Netlify Functions
-
-> 这些函数文件**不在本仓库里**。本仓库只负责前端静态文件；授权与代理函数随博客站点一起部署，Fork 本仓库不会自动得到它们——需要按下面的职责说明自行实现，或从已有的部署里复制过去。
-
-函数源码**不能放在 `publish` 目录里**（`public/` 下的东西会被当静态资源发布，`netlify/functions` 又必须可被 Netlify 打包）。推荐放在博客仓库根：
-
-```text
-你的博客仓库/
-├── netlify/
-│   └── functions/
-│       ├── github-auth-start.js        跳转 GitHub 授权页，下发 state
-│       ├── github-auth-callback.js     校验 state、换 token、加密写 cookie
-│       ├── github-api.js               API 代理：鉴权、限仓库、限端点、续期
-│       ├── lib/
-│       │   └── github-writes.js        写操作策略（路径、后缀、文件头、ref 前进规则）
-│       └── online-hexo-editor-proxy.js 子路径反向代理（注入 <base>）
-├── source/
-├── netlify.toml
-└── package.json
-```
-
-各函数职责与实现要点：
-
-| 文件 | 职责 | 关键点 |
-|---|---|---|
-| `github-auth-start.js` | 拼 `https://github.com/login/oauth/authorize`，302 过去 | 随机 state 写 cookie：`Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600` |
-| `github-auth-callback.js` | 校验 state → `POST /login/oauth/access_token` 换 token → 加密写 `gh_token` | `gh_token` 用 `Path=/api/github`；失败 302 到 `?auth=error&reason=…` 并清 state |
-| `github-api.js` | 读 cookie、解密、注入 `Authorization`、转发到 `api.github.com` | 仓库全等校验；方法 + 路径白名单；401 时用 refresh token 续期，续期失败不清 Cookie |
-| `lib/github-writes.js` | 判断一次写操作是否允许 | 必须 JSON、不带 query、tree 路径限 `source/_posts/` 与 `source/images/`、后缀 + 魔数校验、ref 只能前进、`force` 必须 `false`、冲突 409 |
-| `online-hexo-editor-proxy.js` | 把挂载点转到前端静态站点 | HTML 注入 `<base href="/tools/online-hexo-editor/">`；HTML/JS/CSS 不缓存 |
-
-函数用 CommonJS 的 `exports.handler`，依赖 Node 18+ 自带的 `fetch` 与 `crypto`，不需要 `node-fetch`。若你把编辑器挂到别的前缀，`online-hexo-editor-proxy.js` 里的 `MOUNT` 常量、`netlify.toml` 的 redirect、`GITHUB_AUTH_RETURN` 三处要一起改。
-
-两个 Netlify 的坑：
-
-- 一次要下发多条 `Set-Cookie` 时（`gh_token` 新值 + 清旧值 + 清 state），必须用 `multiValueHeaders`；普通 `headers` 只接受字符串，写数组会被吞掉；
-- `functions` 目录写对后，部署日志里会列出被打包的函数（`github-api`、`github-auth-start` 等）；一个都没列出来就是路径错了。
-
-### 5. 配置 netlify.toml
+1. 从本仓库复制 [`deploy/netlify/functions/`](deploy/netlify/functions/) 到目标项目根目录的 `netlify/functions/`，保留 `lib/`。函数目录应在 Hexo 的 `source/` 和 Netlify 发布目录（通常为 `public/`）之外。
+2. 以 [`deploy/netlify/netlify.toml`](deploy/netlify/netlify.toml) 为模板。目标项目已有 `netlify.toml` 时，合并相关配置。A、B 两种方案继续使用博客原有构建命令和发布目录。C 使用下文的静态构建配置。
+3. 确认下面两条重写规则位于会匹配它们的通配规则之前，尤其是授权入口必须排在 `/api/github/*` 前面。OAuth 回调直接使用 Netlify 的函数地址。
 
 ```toml
-[build]
-  command = "npm ci && npx hexo generate"
-  publish = "public"
-  functions = "netlify/functions"
-
-[build.environment]
-  NODE_VERSION = "22"
-
-# 1) 编辑器子路径：带尾斜杠与不带尾斜杠各一条
-[[redirects]]
-  from = "/tools/online-hexo-editor/*"
-  to = "/.netlify/functions/online-hexo-editor-proxy"
-  status = 200
-
-[[redirects]]
-  from = "/tools/online-hexo-editor"
-  to = "/.netlify/functions/online-hexo-editor-proxy"
-  status = 200
-
-# 2) 授权入口：必须排在 /api/github/* 通配之前
 [[redirects]]
   from = "/api/github/auth/start"
   to = "/.netlify/functions/github-auth-start"
   status = 200
+  force = true
 
-# 3) API 代理
 [[redirects]]
   from = "/api/github/*"
   to = "/.netlify/functions/github-api"
   status = 200
+  force = true
 ```
 
-要点：
+`status = 200` 表示由 Netlify 在当前域名内重写请求。这样浏览器可以通过编辑器所在的域名请求 API，并发送该域名的会话 Cookie。[Netlify 重写文档](https://docs.netlify.com/manage/routing/redirects/rewrites-proxies/)
 
-- `status = 200` 是 rewrite，地址栏不变，cookie 才会继续属于你的域；
-- redirects 自上而下匹配，`/api/github/auth/start` 写在通配后面会被吞掉，表现为点登录直接 401；
-- `functions` 目录必须在 `publish` 之外，否则 Netlify 会拒绝或把函数源码一起发布。
+### 方案 A 随主站发布
 
-### 6. 配置环境变量
+1. 将本仓库的 `index.html` 和整个 `assets/` 复制到博客仓库的 `source/tools/online-hexo-editor/`。
+2. 在博客的 `_config.yml` 中把下面的条目合并到 `skip_render`，保留已有条目。Hexo 会原样复制这组文件。[Hexo 配置文档](https://hexo.io/docs/configuration)
 
-Netlify → Site configuration → Environment variables：
+   ```yaml
+   skip_render:
+     - "tools/online-hexo-editor/**/*"
+   ```
+3. 如果之前启用了两条 `/tools/online-hexo-editor` 静态代理规则，从主站的配置中移除它们。编辑器由 Hexo 的发布目录直接提供，`ONLINE_HEXO_EDITOR_UPSTREAM` 可留空。
+4. 在主站配置下文的 GitHub App 和环境变量。按原有方式构建博客，确认 `public/tools/online-hexo-editor/index.html` 和同目录下的 `assets/` 已生成。部署完成后从主站编辑器入口登录。
 
-| 变量 | 必填 | 说明 | 示例 |
-|---|---|---|---|
-| `GITHUB_APP_CLIENT_ID` | 是 | GitHub App 的 Client ID | `Iv1.0a1b2c3d4e5f6g7h` |
-| `GITHUB_APP_CLIENT_SECRET` | 是 | 上一步生成的 Client secret | `a1b2c3…` |
-| `GITHUB_TOKEN_SECRET` | 是 | cookie 加密密钥，**≥32 字节随机串** | 见下方命令 |
-| `GITHUB_REPO` | 是 | 唯一放行的仓库，`owner/repo` | `your-name/your-blog` |
-| `GITHUB_AUTH_CALLBACK` | 是 | 必须与 GitHub App 里登记的**一字不差**；默认值指向原作者域名，不改会失败 | `https://你的域名/.netlify/functions/github-auth-callback` |
-| `GITHUB_AUTH_RETURN` | 建议 | 授权完成后回跳的地址 | `/tools/online-hexo-editor/?auth=ok` |
-| `ONLINE_HEXO_EDITOR_UPSTREAM` | 用子路径代理时必填 | 前端静态站点地址，末尾不要带 `/` | `https://你的用户名.github.io/你的仓库名` |
+### 方案 B 主站代理独立静态站
 
-生成密钥：
+1. 在独立静态站点的发布目录放入 `index.html` 和 `assets/`，让它们分别可从站点的 `/index.html` 和 `/assets/` 访问。另开 Netlify 项目时，可以用 `public/` 作为发布目录，构建命令留空。这个项目只提供静态文件，GitHub App、Functions 和密钥都配置在博客主站。
+2. 在博客主站的 `netlify.toml` 启用模板中两个编辑器代理规则，分别匹配 `/tools/online-hexo-editor` 和 `/tools/online-hexo-editor/*`，都以 `status = 200` 重写到 `/.netlify/functions/online-hexo-editor-proxy`。把两条规则放在博客的全站通配路由前。如果已有 A 方案的同名静态页面，迁移时从博客发布产物移除那一份，避免静态文件优先匹配。
+3. 在**主站**的 Netlify 环境变量中设置 `ONLINE_HEXO_EDITOR_UPSTREAM`，填写能找到编辑器 `index.html` 的 HTTPS 目录地址。独立站点可填 `https://editor.example.com`，GitHub Project Pages 要带上仓库路径，例如 `https://<owner>.github.io/<repo>/`。如果希望主站只使用指定版本，填 Netlify 部署的永久地址，例如 `https://<deploy-id>--<site-name>.netlify.app`。[Netlify 部署永久链接](https://docs.netlify.com/manage/domains/domains-fundamentals/domains-glossary/)
+4. 重新部署博客主站。从 `https://blog.example.com/tools/online-hexo-editor/` 登录。直接访问静态上游只会看到编辑器外壳，因为上游没有登录和仓库 API。
 
-```bash
-openssl rand -base64 32
-# 没有 openssl 时（Windows 也行）：
-node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
-```
+### 方案 C 编辑器独立运行
 
-注意：
+1. 创建一个单独的 Netlify 项目。将 `index.html` 和 `assets/` 放到该项目的 `public/`，将随附函数放到 `netlify/functions/`。
+2. 将模板复制到独立项目的根目录，删除 `[build]` 中的 Hexo 构建命令，保留下面的发布目录和函数目录。Netlify 项目的构建命令也留空。保留模板中的两条 API 路由，编辑器静态代理规则保持注释。[Netlify 构建配置](https://docs.netlify.com/build/configure-builds/overview/)
 
-- 函数代码里带有与原作者站点相关的默认值（回调地址、回跳地址、上游地址）。`GITHUB_AUTH_CALLBACK` 与 `ONLINE_HEXO_EDITOR_UPSTREAM` 必须显式覆盖，否则会指向别人的域名。
-- 改过环境变量必须重新部署才生效（Deploys → Trigger deploy → Deploy site）。
-- `GITHUB_TOKEN_SECRET` 换掉等于让所有已登录会话失效，这是正常的强制下线手段。
+   ```toml
+   [build]
+     publish = "public"
+     functions = "netlify/functions"
+   ```
+3. 在**独立编辑器项目**配置 GitHub App 和环境变量。把 `GITHUB_AUTH_CALLBACK` 设为 `https://editor.example.com/.netlify/functions/github-auth-callback`，并在 GitHub App 中登记同一地址。因为编辑器从根路径打开，把 `GITHUB_AUTH_RETURN` 设为 `/`。静态上游变量留空。
+4. 用户直接访问 `https://editor.example.com/`。博客主站可以链接这个地址。登录 Cookie 和浏览器本地暂存按站点分开，换到独立域名后需要重新登录，原域名里尚未保存到 GitHub 的内容也不会自动迁移。编辑器写入的仍是 `GITHUB_REPO` 指向的博客仓库，博客的构建继续由博客项目处理。
 
-### 7. 部署并逐项验收
+### 配置 GitHub App
 
-推送博客仓库触发构建，部署日志里应能看到 `github-api`、`github-auth-start` 等函数被打包。然后按顺序验：
+1. 在 GitHub 的 **Settings → Developer settings → GitHub Apps** 创建 App。将 **User authorization callback URL** 设为处理登录的站点域名加上 `/.netlify/functions/github-auth-callback`。A、B 使用博客域名，C 使用编辑器域名。
+2. 在 **Repository permissions → Contents** 选择 **Read and write**。关闭项目用不到的 Webhook，只将 App 安装到目标博客仓库。登录编辑器的 GitHub 用户也需要对该仓库有对应的读写权限。
+3. 记录 App 的 **Client ID**，生成 **Client Secret**，填入下一节的环境变量。若一个 App 同时服务多个入口，在 GitHub App 中登记各入口的实际回调地址。[GitHub App 回调文档](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/about-the-user-authorization-callback-url)
 
-| # | 操作 | 预期 |
-|---|---|---|
-| 1 | 打开 `https://你的域名/tools/online-hexo-editor/` | 页面正常，样式与脚本都加载（无 404） |
-| 2 | 未登录时自动跳转 | 地址栏出现 `github.com/login/oauth/authorize?client_id=…&redirect_uri=…&state=…` |
-| 3 | 授权后回跳 | 回到 `/tools/online-hexo-editor/?auth=ok`，列表出现文章 |
-| 4 | 左下角状态 | 显示仓库名与文章篇数，可写 |
-| 5 | 打开任意文章 | 顶部显示「只读 · main」，正文可见 |
-| 6 | 点「编辑」→ 改标题 → `Ctrl+S` | GitHub 上出现 `draft/<abbrlink>` 分支，含 1 个 commit |
-| 7 | 点「发布」→ 确认 | `main` 多一个 `post: 标题` 的 commit；Netlify 开始构建；草稿分支被删 |
-| 8 | 图片 → 上传一张 PNG | 落到 `source/images/YYYY/MM/`，正文插入 `![](/images/…)` |
-| 9 | 图片 → 删除一张被引用的图 | 被拒绝，并列出引用它的文章 |
+### 设置 Netlify 环境变量
 
-不想开浏览器时，可以用 curl 验代理层的三个边界：
+在**处理 OAuth 和 API** 的 Netlify 项目打开 **Environment variables**。如界面提供作用域设置，选择包含 **Functions** 的作用域。修改环境变量后创建新的部署。[Netlify Functions 环境变量文档](https://docs.netlify.com/build/functions/environment-variables/)
 
-```bash
-# 未登录：应 401（不是 500，也不是 GitHub 的错误页）
-curl -i https://你的域名/api/github/repos/你的用户名/你的博客仓库
-
-# 别的仓库：应 403
-curl -i https://你的域名/api/github/repos/octocat/hello-world
-
-# 未授权的方法：应 405
-curl -i -X PUT https://你的域名/api/github/repos/你的用户名/你的博客仓库/contents/x
-```
-
-### 8. 常见故障
-
-| 症状 | 多半是 | 怎么查 |
-|---|---|---|
-| 页面 404 或样式全丢 | 子路径代理没生效；或 `index.html` 用了绝对路径 `/assets/...` | 看代理有没有注入 `<base>`；资源引用必须写成 `assets/...` |
-| 点登录后一直 401 循环 | 回调失败 | 看地址栏 `?auth=error&reason=`，对照下面的「授权错误码」表 |
-| 授权回来 `state_mismatch` | `gh_oauth_state` 的 `Path` 不是 `/`，或回调 URL 与 App 登记不一致 | 回调函数在 `/.netlify/functions/` 下，读不到 `Path=/api/github` 的 cookie |
-| `403 repository not allowed` | 前端 `REPO` 与 `GITHUB_REPO` 不一致，或 App 没装到该仓库 | 两处字符串逐字对比 |
-| 读仓库 404 | App 已创建但没 Install；或仓库名写错 | Settings → Applications 里看安装范围 |
-| 保存报 409 / 「远端已更新」 | `main` 前进了，或同名文件被占用 | 重新打开该草稿再改；必要时删掉草稿分支重来 |
-| 发布后界面还是旧的 | 代理层给 HTML/JS 加了长缓存 | HTML 用 `max-age=0, must-revalidate`，JS/CSS 用 `no-cache, must-revalidate` |
-| 上传图片 403 | 类型不在白名单，或文件头与后缀不符 | 只支持 png/jpg/gif/webp/bmp/ico/avif；SVG 不支持 |
-| 函数超时 / 502 | 单次请求太多，或上游慢 | 免费版函数 10 秒上限；拆分操作、减少单次批量篇数 |
-| 环境变量改了没反应 | 没重新部署 | Deploys → Trigger deploy |
-
-**授权错误码**
-
-| `reason` | 含义 |
+| 变量 | 配置 |
 |---|---|
-| `app_not_configured` | 没配 `GITHUB_APP_CLIENT_ID` / `SECRET` |
-| `token_secret_missing` | 没配 `GITHUB_TOKEN_SECRET` |
-| `no_code` | GitHub 没回传 code（多半是用户取消授权） |
-| `state_mismatch` | state 对不上：cookie 路径错、回调 URL 不一致、或授权页停留超过 10 分钟 |
-| `exchange_failed` | 调 GitHub 换 token 网络失败 |
-| `no_token` | GitHub 明确拒绝（client secret 错、code 已用过、回调地址不匹配） |
+| `GITHUB_REPO` | 必填。目标博客仓库，例如 `example-owner/example-blog`。方案 C 也填博客仓库。 |
+| `GITHUB_APP_CLIENT_ID` | 必填。GitHub App 的 Client ID。 |
+| `GITHUB_APP_CLIENT_SECRET` | 必填。GitHub App 的 Client Secret，只供 Functions 使用。 |
+| `GITHUB_TOKEN_SECRET` | 必填。会话加密密钥，用下方命令生成，只供 Functions 使用。 |
+| `GITHUB_AUTH_CALLBACK` | 必填。完整 HTTPS 回调地址，与 GitHub App 中登记的值一致。 |
+| `GITHUB_AUTH_RETURN` | A、B 默认使用 `/tools/online-hexo-editor/`。C 从根路径打开时填 `/`。值为站内路径。 |
+| `ONLINE_HEXO_EDITOR_UPSTREAM` | 仅 B 必填。在博客主站填写静态前端的 HTTPS 地址。 |
+
+```bash
+node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"
+```
+
+### 验证部署和排查故障
+
+1. 在未登录窗口访问编辑器所在域名的 `/api/github/repo`。预期返回 `401` 和 `not signed in`。
+2. 打开对应方案的编辑器入口，确认样式和脚本加载成功。完成 GitHub 授权后，确认回到同一个域名的编辑器，页面显示的仓库与 `GITHUB_REPO` 一致，并能加载文章和图片。
+3. 在测试博客保存一篇草稿，确认 `draft/*` 分支出现而 `main` 尚未更新。再发布测试文章，确认 `main` 更新；如果博客项目连接了该仓库的 `main`，检查博客构建是否启动。
+
+| 症状 | 检查项 |
+|---|---|
+| `/api/github/repo` 返回 404 | 确认访问的是实际编辑器入口所在域名。检查该 Netlify 项目是否已部署 Functions，以及是否加载了 API 路由。 |
+| `GITHUB_REPO` 配置错误 | 检查值是否为 `owner/repo`，环境变量是否设置在运行 Functions 的项目，以及是否已创建新部署。 |
+| `app_not_configured` / `token_secret_missing` | 检查 Client ID、Client Secret、回调地址和会话加密密钥。 |
+| `state_mismatch` 或授权后回到错误页面 | 用最终入口域名重新发起登录，核对 GitHub App 的回调地址、`GITHUB_AUTH_CALLBACK` 和 `GITHUB_AUTH_RETURN`。 |
+| 授权后查询仓库返回 404 | 检查 GitHub App 的安装范围和当前 GitHub 用户对目标仓库的权限。 |
+| 页面打开但样式或脚本返回 404 | A 检查 Hexo 构建产物中的 `tools/online-hexo-editor/assets/`。B 检查两条主站代理规则及上游的 `/assets/`。C 检查 `public/assets/`。 |
 
 ---
 
 ## 日常升级与回滚
 
-**升级前端**：改完 push 到 Pages 仓库即可。代理层对 HTML/JS/CSS 都是回源校验，浏览器不会长期吃旧文件。
+**从旧版升级**。A、B 方案先更新博客主站的代理和 Functions，再更新编辑器前端。新代理仍接受旧前端对已配置仓库的请求。更新后先检查主站的 `/api/github/repo` 能否返回预期的登录状态。
 
-**升级函数**：push 博客仓库 → Netlify 生产构建。注意这会**连带重建整个站点**，如果站点有其他改动没准备好，建议先用 Deploy Preview 验。
+| 方案 | 更新和回滚 |
+|---|---|
+| A 随主站发布 | 更新博客仓库中随站发布的静态文件。部署有问题时，在主站 Netlify 项目重新发布之前的可用部署。 |
+| B 主站代理独立静态站 | 先发布并验证上游的新版本。如果使用固定部署地址，更新主站的 `ONLINE_HEXO_EDITOR_UPSTREAM` 后重新部署主站。回滚时指回上一个可用的固定地址，再部署主站。 |
+| C 编辑器独立运行 | 在独立编辑器项目一起更新前端和 Functions。回滚时在该项目重新发布之前的可用部署。 |
 
-**回滚**：
-
-- 函数 / 站点：Netlify → Deploys → 找到上一个成功的部署 → **Publish deploy**；
-- 前端：`git revert` 后 push，等 Pages 发布；
-- 数据：发布是普通 commit，`git revert` 那个 `post: …` 提交并推送即可让文章回到上一版（记得同步删掉残留的 `draft/*` 分支）。
+站点部署回滚不会撤销已经写入 GitHub 的文章变更。要恢复文章，先核对博客仓库中的发布提交，再对相应提交执行 `git revert`。
 
 ---
 
 ## 已知边界
 
-- **必须同源部署**：`file://` 收不到 OAuth 回调；直接开 GitHub Pages 带不上主站 cookie。两种情况都进不了编辑器。
+- **编辑入口需要同源 API**。直接打开本地 HTML 或纯静态上游时，仅能加载前端文件。请从主站入口或带 Functions 的独立编辑器域名登录。
 - **只服务一个仓库**：代理按 `GITHUB_REPO` 精确放行，换仓库要改环境变量并重新部署。
 - **私有仓库没有缩略图**：图片首次预览要从 GitHub 拉原图，之后按 sha 缓存。
 - **不做图片重命名 / 移动**，也不做发布冲突的自动合并（冲突直接拒绝）。

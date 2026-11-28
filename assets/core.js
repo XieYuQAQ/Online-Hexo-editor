@@ -4,7 +4,7 @@
  * 无任何依赖，浏览器与 Node 通用（浏览器挂到 window.HexoCore）。
  *
  * 设计目标：**未修改的字段按原样回写**（逐字节保留），
- * 因此对 D:\ZEROKAMI\source\_posts 下 89 篇文章做「读入 → 直接序列化」
+ * 可对博客 source/_posts 下的文章做「读入 → 直接序列化」
  * 必须是 byte-identical，测试见 test/roundtrip.test.mjs。
  */
 (function (root, factory) {

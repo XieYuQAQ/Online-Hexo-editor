@@ -577,7 +577,7 @@
   var ghCacheTimer = 0;
 
   function ghCacheId() {
-    return 'ghPosts:' + (state.githubRepo || (window.GitHubStore && GitHubStore.repo) || 'default');
+    return 'ghPosts:' + (state.githubRepo || 'default');
   }
 
   /** 从已解析的 doc 里抽列表要用的字段 */
@@ -734,7 +734,7 @@
     state_mismatch: '登录校验失败（state 不匹配）。可能是授权页停留太久，或 Cookie 被清理，重试一次即可。',
     exchange_failed: '服务端用授权码换取 token 失败，通常是网络问题或 GitHub App 配置有误。',
     no_token: 'GitHub 没有返回 access token，请确认 GitHub App 的权限配置。',
-    app_not_configured: '服务端没有配置 GITHUB_APP_CLIENT_ID / GITHUB_APP_CLIENT_SECRET。',
+    app_not_configured: '服务端的 GitHub App 配置不完整，请检查 Client ID、Client Secret 和 OAuth 回调地址。',
     token_secret_missing: '服务端没有配置 GITHUB_TOKEN_SECRET（用于加密 Cookie）。',
     unknown: '授权没有完成，原因未知。'
   };
@@ -855,7 +855,7 @@
   var imgDom = { list: null, summary: null, search: null, note: null };
 
   function imgQueueKey() {
-    return IMG_QUEUE_PREFIX + (state.githubRepo || (window.GitHubStore && GitHubStore.repo) || 'default');
+    return IMG_QUEUE_PREFIX + (state.githubRepo || 'default');
   }
 
   function loadImgQueue() {
@@ -989,7 +989,7 @@
 
   /** 图片扫描缓存 / 仓库版本签名 */
   function imgScanCacheKey() {
-    return 'hexo-editor:imgscan:' + (state.githubRepo || (window.GitHubStore && GitHubStore.repo) || 'default');
+    return 'hexo-editor:imgscan:' + (state.githubRepo || 'default');
   }
   async function loadImgScanCache() {
     try { return await idb.get(imgScanCacheKey()); } catch (e) { return null; }
@@ -2061,7 +2061,7 @@
     var repoPath = path.replace(/^\/images\//, 'source/images/');
     return ensureImageIndex().then(function (idx) {
       // 草稿分支或 main 上都有这张图时，直接从 GitHub 读 blob 预览：
-      // 不依赖 zerokami.cn 是否已经重新构建，避免刚发布那几分钟的 404。
+      // 不依赖博客是否已经重新构建，避免刚发布时出现 404。
       var sha = idx.drafts[repoPath] || idx.main[repoPath];
       if (!sha) return '';
       var hit = imgPreviewCache[path];
@@ -3840,7 +3840,7 @@
 
     // 本地目录模式已移除：双击打开只能看到一个提示，避免误以为还能写盘
     if (location.protocol === 'file:') {
-      toast('本地模式已移除，请访问 https://zerokami.cn/tools/online-hexo-editor', 'err');
+      toast('请从博客站点的在线编辑器入口打开。', 'err');
       state.booted = true;
       return;
     }

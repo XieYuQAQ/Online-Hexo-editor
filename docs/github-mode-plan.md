@@ -5,11 +5,12 @@
 > 不在范围内：Hexo 主题、文章内容、Waline
 
 > **实现现状（2026-11 更新）**：本文是最初的设计稿，最终实现与原文有出入，冲突处以
-> `README.md` 和博客仓库 `source/netlify/functions/` 为准。已知差异：
+> `README.md` 和本仓库的 `deploy/netlify/functions/` 为准。已知差异：
 >
 > - 本地目录模式已移除，只剩 GitHub 模式；启动时的「选择模式」弹窗不再存在（§1、§12 第 1 条）
 > - cookie 作用域改为 `Path=/api/github`，401 不再清 Cookie（§3.2、§3.4）
 > - 端点白名单按「方法 + 路径」收敛，含 `DELETE` 仅限 `draft/*`（§11）
+> - 前端统一请求 `/api/github/repo`，目标仓库由服务端的 `GITHUB_REPO` 配置
 
 ---
 
@@ -30,7 +31,7 @@
 - 编辑器不运行 Hexo、不做站点预览。
 - 不做图片重命名 / 移动。
 - 不做在线多人协作；冲突一律拒绝并提示，不自动合并。
-- GitHub 模式只在 `zerokami.cn/tools/hexo-editor` 下可用（原因见 §3.3）。
+- GitHub 模式只在 `blog.example.com/tools/hexo-editor` 下可用（原因见 §3.3）。
 
 ---
 
@@ -50,7 +51,7 @@ GitHub API  api.github.com
         │
         │ 发布：差量 tree 合并（一次 commit）
         ▼
-      main ──→ Netlify 构建 ──→ zerokami.cn
+      main ──→ Netlify 构建 ──→ blog.example.com
 ```
 
 关键约束：
@@ -76,11 +77,11 @@ GitHub App + Netlify Function，用户级授权（user-to-server token）。
 | Pull requests | 不需要 | 不建 PR，直接更新 ref |
 | Actions / Workflows / Secrets | 不需要 | — |
 
-**安装范围**：仅 `XieYu-Zk/zerokami` 一个仓库。
+**安装范围**：仅 `example-owner/example-blog` 一个仓库。
 
 ### 3.2 流程
 
-1. 用户点「连接 GitHub」→ 跳转 `https://github.com/login/oauth/authorize?client_id=…&redirect_uri=https://zerokami.cn/.netlify/functions/github-auth-callback`
+1. 用户点「连接 GitHub」→ 跳转 `https://github.com/login/oauth/authorize?client_id=…&redirect_uri=https://blog.example.com/.netlify/functions/github-auth-callback`
 2. 回调 Function 用 `client_id + client_secret + code` 换 token
 3. token 写入 `HttpOnly; Secure; SameSite=Lax; Path=/api/github` cookie（加密后存放，密钥在 Netlify 环境变量）
    - 收窄 Path 后，访问博客文章、图片、`/comment/*` 都不会再携带 token
@@ -97,20 +98,20 @@ GITHUB_APP_ID
 GITHUB_APP_CLIENT_ID
 GITHUB_APP_CLIENT_SECRET
 GITHUB_TOKEN_SECRET      # cookie 加密密钥
-GITHUB_REPO              # XieYu-Zk/zerokami
+GITHUB_REPO              # example-owner/example-blog
 ```
 
 ### 3.3 为什么限定域名
 
 - `file://` 无法接收 OAuth 回调，也无法带 cookie。
-- `xieyuqaq.github.io` 与 `zerokami.cn` 跨站，`SameSite=Lax` cookie 不会发送。
-- 因此 GitHub 模式只在 `zerokami.cn` 下启用；从 `file://` 或 GitHub Pages 打开时，启动弹窗只显示「本地目录」，并注明原因。
+- `editor.example.com` 与 `blog.example.com` 跨站，`SameSite=Lax` cookie 不会发送。
+- 因此 GitHub 模式只在 `blog.example.com` 下启用；从 `file://` 或 GitHub Pages 打开时，启动弹窗只显示「本地目录」，并注明原因。
 
 ### 3.4 安全要点
 
 - token 不进 localStorage、不进前端内存、不出现在 URL。
 - Function 只代理白名单端点（见 §11），不接受任意路径，避免变成开放代理。
-- 仓库校验用「精确匹配或前缀带斜杠」：只写 `startsWith(PREFIX)` 会放行 `ZEROKAMI-STUDIO-backup` 这类同前缀仓库。
+- 仓库校验用「精确匹配或前缀带斜杠」：只写 `startsWith(PREFIX)` 会放行 `example-blog-backup` 这类同前缀仓库。
 - 路径里出现 `%2e` / `%2f` / `%5c` 一律拒绝（中文文件名的 `%E4` 之类不受影响），堵住 `..%2f` 形式的编码绕过。
 - 请求的 `Accept` 不透传给 GitHub，统一固定 `application/vnd.github+json`；响应固定带 `X-Content-Type-Options: nosniff`。
 - 401 不清 Cookie（见 §3.2 第 5 步），避免并发续期互相覆盖。
@@ -122,7 +123,7 @@ GITHUB_REPO              # XieYu-Zk/zerokami
 
 | 项 | 规则 |
 |---|---|
-| 仓库 | 私有，`XieYu-Zk/zerokami` |
+| 仓库 | 私有，`example-owner/example-blog` |
 | `main` | 已发布内容，编辑器内只读 |
 | 草稿分支 | `draft/<abbrlink>`，一篇一分支 |
 | 分支创建时机 | 第一次点「保存」时创建，避免空分支 |
@@ -438,7 +439,7 @@ abbrlink = crc32(title) 的十六进制，不补零
 2. **批量发布上限**：建议一次最多 20 篇，超过时提示分批，避免单次请求过多。
 3. **图片预览**：接受「点击才加载原图」而不是真正的缩略图？
 4. **草稿丢弃**：关闭未保存的编辑不产生分支；已保存的草稿需要显式「丢弃草稿」才删除分支。这样处理可以吗？
-5. **README 中的插图**：`README.md` 引用了 `zerokami.cn/images/...` 的站内图，图片管理扫描时会把它们算作引用，属于正常行为，确认不需要排除。
+5. **README 中的插图**：`README.md` 引用了 `blog.example.com/images/...` 的站内图，图片管理扫描时会把它们算作引用，属于正常行为，确认不需要排除。
 
 ---
 

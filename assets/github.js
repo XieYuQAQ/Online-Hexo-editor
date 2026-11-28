@@ -6,8 +6,7 @@
 (function (root) {
   'use strict';
 
-  var REPO = root.HEXO_EDITOR_REPO || 'XieYu-Zk/ZEROKAMI-STUDIO';
-  var BASE = '/api/github/repos/' + REPO;
+  var BASE = '/api/github/repo';
   var POSTS_DIR = 'source/_posts/';
   var IMAGES_DIR = 'source/images/';
   // 与代理层的可写集合同步：svg 不在允许列表里，列出来只会让「删除」必然失败
@@ -331,7 +330,6 @@
   }
 
   root.GitHubStore = {
-    repo: REPO,
     postsDir: POSTS_DIR,
     imagesDir: IMAGES_DIR,
     login: login,
